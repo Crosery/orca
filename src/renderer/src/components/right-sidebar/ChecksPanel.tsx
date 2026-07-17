@@ -99,10 +99,14 @@ import {
 } from './pr-comment-thread-resolution'
 import { installWindowVisibilityTimeoutPoller } from '@/lib/window-visibility-timeout-poller'
 import {
-  getChecksPanelEmptyStateCopy,
+  getChecksPanelReviewState,
   shouldShowChecksPanelPublishBranchAction
 } from './checks-panel-empty-state'
-import { hasAmbiguousGitHubHostedReviewForChecksPanel } from './checks-panel-ambiguous-github-review'
+import { resolveChecksPanelReviewLookup } from './checks-panel-review-lookup-authority'
+import {
+  isChecksPanelHardRefreshErrorType,
+  shouldOpenChecksPanelCreateComposer
+} from './checks-panel-review-creation'
 import { recordChecksPanelPRRefreshBreadcrumb } from './checks-panel-pr-refresh-breadcrumb'
 import {
   cancelRuntimeGeneratePullRequestFields,
@@ -658,11 +662,13 @@ export default function ChecksPanel(): React.JSX.Element {
   const hostedReview = useAppStore((s) =>
     hostedReviewCacheKey ? (s.hostedReviewCache[hostedReviewCacheKey]?.data ?? null) : null
   )
-  const hasAmbiguousGitHubHostedReview = hasAmbiguousGitHubHostedReviewForChecksPanel({
-    hostedReview,
-    prCacheEntry,
-    prCacheKey
-  })
+  const linkedReviewNumber =
+    activeWorktree?.linkedPR ??
+    activeWorktree?.linkedGitLabMR ??
+    activeWorktree?.linkedBitbucketPR ??
+    activeWorktree?.linkedAzureDevOpsPR ??
+    activeWorktree?.linkedGiteaPR ??
+    null
   // Fetch PR data when the active worktree/branch changes.
   // Why: branch lookup is lossy for fork/deleted-head PRs; reuse a known PR
   // number from metadata or the visible cache whenever we have one.
@@ -843,6 +849,20 @@ export default function ChecksPanel(): React.JSX.Element {
     hostedReviewCreation?.provider
   )
   const hostedReviewCreateCopy = localizedHostedReviewCopy(hostedReviewCreateProvider)
+  // Four-state review evidence: replaces the old ambiguous-GitHub boolean so the
+  // empty state can never claim "No review found" without accepted evidence.
+  const checksPanelReviewLookupResult = resolveChecksPanelReviewLookup({
+    pr,
+    prCachedHasPR,
+    hostedReview,
+    linkedReviewNumber,
+    eligibilityReviewLookupOutcome: hostedReviewCreation?.reviewLookupOutcome ?? null,
+    eligibilityReview: hostedReviewCreation?.review ?? null
+  })
+  const checksPanelReviewLookup = checksPanelReviewLookupResult.state
+  const checksPanelHasHardRefreshError =
+    prRefreshState?.status === 'error' &&
+    isChecksPanelHardRefreshErrorType(prRefreshState.errorType)
   const activePullRequestGenerationKey = getPullRequestGenerationRecordKey({
     worktreeId: activeWorktreeId,
     worktreePath: activeWorktreePath,
@@ -918,12 +938,17 @@ export default function ChecksPanel(): React.JSX.Element {
     () => (settings ? resolveSourceControlAiEnabled({ settings, repo }) : false),
     [repo, settings]
   )
-  const createComposerOpen =
-    !activeReview &&
-    !isFolder &&
-    Boolean(branch) &&
-    (hostedReviewCreation?.canCreate === true ||
-      hostedReviewCreation?.blockedReason === 'needs_push')
+  // Confirmed-only composer gate: keeps canCreate / needs_push semantics and
+  // hard-blocks on positive unresolved evidence or a hard refresh error so
+  // Create / Push & Create never appears when review existence is ambiguous.
+  const createComposerOpen = shouldOpenChecksPanelCreateComposer({
+    activeReview,
+    isFolder,
+    branch,
+    hostedReviewCreation,
+    reviewLookup: checksPanelReviewLookup,
+    hasHardRefreshError: checksPanelHasHardRefreshError
+  })
   const handleGeneratePullRequestFieldsForActive = useCallback(
     async (
       fields: PullRequestGenerationFields,
@@ -3580,16 +3605,49 @@ export default function ChecksPanel(): React.JSX.Element {
           hasUpstream: publishActionRemoteStatus?.hasUpstream,
           hasCurrentBranch: Boolean(branch)
         }))
-    const emptyStateCopy = getChecksPanelEmptyStateCopy({
+    // GitLab/other providers have no typed GitHub refresh state; only feed the
+    // GitHub refresh classification into the selector for GitHub contexts.
+    const emptyRefreshInput =
+      emptyReviewIsGitLab || !prRefreshState
+        ? undefined
+        : {
+            status: prRefreshState.status,
+            errorType: prRefreshState.errorType,
+            skippedReason: prRefreshState.skippedReason,
+            nextAutoRetryAt: prRefreshState.nextAutoRetryAt,
+            retryDisabledUntil: prRefreshState.retryDisabledUntil
+          }
+    const reviewState = getChecksPanelReviewState({
       operationLabel,
-      prRefreshStatus: emptyReviewIsGitLab ? undefined : prRefreshState?.status,
-      hostedReviewBlockedReason: hostedReviewCreation?.blockedReason,
-      hasUpstream: publishActionRemoteStatus?.hasUpstream,
-      hasCurrentBranch: Boolean(branch),
       reviewLabel: emptyReviewLabel,
       reviewShortLabel: emptyReviewShortLabel,
-      hasAmbiguousGitHubHostedReview
+      providerName: hostedReviewCreateCopy.providerName,
+      isGitHubProvider: hostedReviewCreateProvider === 'github',
+      reviewLookup: checksPanelReviewLookup,
+      openReviewUrl: checksPanelReviewLookupResult.openReviewUrl,
+      eligibilityBlockedReason: hostedReviewCreation?.blockedReason,
+      // Keep selector composer mode aligned with the actual composer gate.
+      confirmedReadiness: createComposerOpen,
+      confirmedNeedsPush: canPushCreate,
+      refresh: emptyRefreshInput,
+      gitStatusPhase: gitStatusInputs.hasUncommittedChanges !== undefined ? 'ready' : 'loading',
+      hasUpstream: publishActionRemoteStatus?.hasUpstream,
+      hasCurrentBranch: Boolean(branch)
     })
+    const emptyStateCopy = { title: reviewState.title, description: reviewState.description }
+    const reviewStateAutoRetryText =
+      reviewState.autoRetryAt !== undefined && reviewState.autoRetryAt > Date.now()
+        ? translate(
+            'auto.components.right.sidebar.ChecksPanel.review.auto_retry',
+            'Orca will retry at {{time}}.',
+            { time: new Date(reviewState.autoRetryAt).toLocaleTimeString() }
+          )
+        : null
+    const reviewRecoveryRetryDisabled =
+      reviewState.retryDisabledUntil !== undefined && Date.now() < reviewState.retryDisabledUntil
+    const reviewRecoveryLabelIsRefresh = reviewState.recovery.includes('refresh')
+    const reviewShowOpenReview =
+      reviewState.recovery.includes('open_review') && Boolean(reviewState.openReviewUrl)
     return (
       <div className="px-4 py-6">
         {detachedHeadDisplay && (
@@ -3599,6 +3657,12 @@ export default function ChecksPanel(): React.JSX.Element {
         )}
         <div className="text-sm font-medium text-foreground">{emptyStateCopy.title}</div>
         <div className="mt-1 text-xs text-muted-foreground">{emptyStateCopy.description}</div>
+        {reviewState.detail ? (
+          <div className="mt-1 text-xs text-muted-foreground">{reviewState.detail}</div>
+        ) : null}
+        {reviewStateAutoRetryText ? (
+          <div className="mt-1 text-xs text-muted-foreground">{reviewStateAutoRetryText}</div>
+        ) : null}
         {!operationInProgress && createComposerOpen ? (
           <div className="mt-4 border-t border-border pt-3">
             <CreateHostedReviewComposer
@@ -3662,11 +3726,36 @@ export default function ChecksPanel(): React.JSX.Element {
                     )}
               </Button>
             )}
+            {reviewShowOpenReview && reviewState.openReviewUrl ? (
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={isRemoteOperationActive}
+                onClick={(event) =>
+                  openChecksPanelHostedReviewUrl({
+                    url: reviewState.openReviewUrl as string,
+                    event,
+                    isMac: isMacPlatform(),
+                    worktreeId: activeWorktreeId
+                  })
+                }
+              >
+                {translate(
+                  'auto.components.right.sidebar.ChecksPanel.review.open_review',
+                  'Open Review'
+                )}
+              </Button>
+            ) : null}
             {!createComposerOpen ? (
               <Button
                 size="xs"
                 variant="outline"
-                disabled={emptyRefreshing || isPublishingBranch || isRemoteOperationActive}
+                disabled={
+                  emptyRefreshing ||
+                  isPublishingBranch ||
+                  isRemoteOperationActive ||
+                  reviewRecoveryRetryDisabled
+                }
                 onClick={() => {
                   if (!activeWorktreeId) {
                     return
@@ -3679,7 +3768,9 @@ export default function ChecksPanel(): React.JSX.Element {
               >
                 {emptyRefreshing
                   ? translate('auto.components.right.sidebar.ChecksPanel.71026ca2cb', 'Refreshing…')
-                  : translate('auto.components.right.sidebar.ChecksPanel.7f4489f370', 'Refresh')}
+                  : reviewRecoveryLabelIsRefresh
+                    ? translate('auto.components.right.sidebar.ChecksPanel.7f4489f370', 'Refresh')
+                    : translate('auto.components.right.sidebar.ChecksPanel.review.retry', 'Retry')}
               </Button>
             ) : null}
           </div>

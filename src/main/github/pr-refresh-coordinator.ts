@@ -405,6 +405,35 @@ function removeQueuedAliasForInvalidCandidate(key: string, alias: GitHubPRRefres
   }
 }
 
+/**
+ * Advances the visible-key error backoff and returns the earliest retry time.
+ * The renderer surfaces this as `nextAutoRetryAt`; only visible keys auto-retry,
+ * so callers must gate on `isVisibleKey` before computing a schedule.
+ */
+function nextVisibleErrorRetryAt(key: string): number {
+  const failures = (errorBackoff.get(key)?.failures ?? 0) + 1
+  const retryAt =
+    Date.now() + Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** Math.min(failures - 1, 4))
+  errorBackoff.set(key, { failures, retryAt })
+  return retryAt
+}
+
+/**
+ * Stamps the unified retry schedule onto an error outcome before broadcast so
+ * every alias receives identical timing. `retryDisabledUntil` is set only for a
+ * rate-limit gate — ordinary network/auth backoff leaves manual Retry enabled.
+ */
+function withErrorSchedule(outcome: PRRefreshOutcome, retryAt: number): PRRefreshOutcome {
+  if (outcome.kind !== 'upstream-error') {
+    return outcome
+  }
+  return {
+    ...outcome,
+    nextAutoRetryAt: retryAt,
+    ...(outcome.errorType === 'rate_limited' ? { retryDisabledUntil: retryAt } : {})
+  }
+}
+
 function scheduleVisibleFollowUp(
   key: string,
   candidate: GitHubPRRefreshCandidate,
@@ -412,7 +441,7 @@ function scheduleVisibleFollowUp(
   priority: number,
   aliases: GitHubPRRefreshAlias[],
   windowId?: number,
-  options?: { pendingMergeabilityDelayMs?: number }
+  options?: { pendingMergeabilityDelayMs?: number; plannedRetryAt?: number }
 ): void {
   if (!isVisibleKey(key)) {
     // Why: manual/active refreshes can remove the queued visible retry after
@@ -421,10 +450,9 @@ function scheduleVisibleFollowUp(
     return
   }
   if (outcome.kind === 'upstream-error') {
-    const failures = (errorBackoff.get(key)?.failures ?? 0) + 1
-    const retryAt =
-      Date.now() + Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** Math.min(failures - 1, 4))
-    errorBackoff.set(key, { failures, retryAt })
+    // Why: reuse the retry time already computed for the broadcast schedule so
+    // the same failure is not counted twice against the backoff.
+    const retryAt = options?.plannedRetryAt ?? nextVisibleErrorRetryAt(key)
     setVisibleFollowUp({
       key,
       candidate,
@@ -748,15 +776,29 @@ async function drainQueue(): Promise<void> {
         next.candidate.linkedPRNumber == null ? (next.candidate.fallbackPRNumber ?? null) : null,
         ...hostedReviewOptionArgs(next.candidate)
       )
+      // Why: compute the retry schedule before broadcasting so the outcome and
+      // its follow-up retry share one timing; only visible keys auto-retry.
+      let plannedRetryAt: number | undefined
+      let broadcastOutcome = outcome
+      if (outcome.kind === 'upstream-error' && isVisibleKey(next.key)) {
+        plannedRetryAt = nextVisibleErrorRetryAt(next.key)
+        broadcastOutcome = withErrorSchedule(outcome, plannedRetryAt)
+      }
       outcomeObserver?.(next.candidate, outcome)
-      broadcast({ aliases, reason: next.reason, outcome, requestStartedAt }, requestSequence)
+      broadcast(
+        { aliases, reason: next.reason, outcome: broadcastOutcome, requestStartedAt },
+        requestSequence
+      )
       scheduleVisibleFollowUp(
         next.key,
         next.candidate,
         outcome,
         next.priority,
         aliases,
-        next.windowId
+        next.windowId,
+        {
+          plannedRetryAt
+        }
       )
     }
   } finally {
@@ -893,6 +935,31 @@ export async function refreshPRNow(candidate: GitHubPRRefreshCandidate): Promise
     return outcome
   }
 
+  // Why: enforce the same rate-limit gate main advertises via `retryDisabledUntil`
+  // so a stale renderer cannot bypass it. A blocked bucket means gh would 403
+  // anyway; refuse without spending quota and report the pause honestly.
+  const manualBlockedGuard = backgroundRefreshBuckets()
+    .map((bucket) => rateLimitGuard(bucket))
+    .find((guard) => guard.blocked)
+  if (manualBlockedGuard?.blocked) {
+    const retryAt = manualBlockedGuard.resetAt * 1000
+    broadcast({
+      aliases,
+      reason: 'manual',
+      status: 'paused',
+      pausedUntil: retryAt,
+      skippedReason: 'rate-limit'
+    })
+    return {
+      kind: 'upstream-error',
+      errorType: 'rate_limited',
+      message: 'GitHub is temporarily limiting requests. Try again after the limit resets.',
+      fetchedAt: Date.now(),
+      nextAutoRetryAt: retryAt,
+      retryDisabledUntil: retryAt
+    }
+  }
+
   queue.delete(key)
   const requestSequence = nextSequence()
   const requestStartedAt = Date.now()
@@ -905,12 +972,22 @@ export async function refreshPRNow(candidate: GitHubPRRefreshCandidate): Promise
     candidate.linkedPRNumber == null ? (candidate.fallbackPRNumber ?? null) : null,
     ...hostedReviewOptionArgs(candidate)
   )
+  let plannedRetryAt: number | undefined
+  let broadcastOutcome = outcome
+  if (outcome.kind === 'upstream-error' && isVisibleKey(key)) {
+    plannedRetryAt = nextVisibleErrorRetryAt(key)
+    broadcastOutcome = withErrorSchedule(outcome, plannedRetryAt)
+  }
   outcomeObserver?.(candidate, outcome)
-  broadcast({ aliases, reason: 'manual', outcome, requestStartedAt }, requestSequence)
+  broadcast(
+    { aliases, reason: 'manual', outcome: broadcastOutcome, requestStartedAt },
+    requestSequence
+  )
   scheduleVisibleFollowUp(key, candidate, outcome, 40, aliases, undefined, {
+    plannedRetryAt,
     // Why: GitHub often reports UNKNOWN immediately after `gh pr reopen`;
     // do one prompt visible retry so conflicts replace the transient label.
     pendingMergeabilityDelayMs: MANUAL_MERGEABILITY_PENDING_REFRESH_MS
   })
-  return outcome
+  return broadcastOutcome
 }

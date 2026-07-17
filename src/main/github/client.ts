@@ -38,6 +38,10 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { sliceCheckLogTail } from './check-job-log-tail-slice'
+import {
+  classifyPRRefreshError,
+  safePRRefreshErrorMessage
+} from './pr-refresh-error-classification'
 import { getPRConflictSummary } from './conflict-summary'
 import { getSshFilesystemProvider } from '../providers/ssh-filesystem-dispatch'
 import { joinWorktreeRelativePath } from '../runtime/runtime-relative-paths'
@@ -177,52 +181,6 @@ async function assertRateLimitBudget(bucket: RateLimitBucketKind): Promise<void>
     throw new Error(
       `GitHub ${bucket} rate limit is low; retry after ${new Date(guard.resetAt * 1000).toLocaleTimeString()}`
     )
-  }
-}
-
-function classifyPRRefreshError(
-  err: unknown
-): Extract<PRRefreshOutcome, { kind: 'upstream-error' }>['errorType'] {
-  const message = err instanceof Error ? err.message : String(err)
-  const lower = message.toLowerCase()
-  if (lower.includes('rate limit')) {
-    return 'rate_limited'
-  }
-  if (
-    lower.includes('timeout') ||
-    lower.includes('no such host') ||
-    lower.includes('network') ||
-    lower.includes('could not resolve host')
-  ) {
-    return 'network'
-  }
-  if (lower.includes('http 403') || lower.includes('resource not accessible')) {
-    return 'permission'
-  }
-  if (lower.includes('http 404') || lower.includes('could not resolve to a repository')) {
-    return 'repo_unavailable'
-  }
-  return /auth|login|credential/i.test(message) ? 'auth' : 'unknown'
-}
-
-function safePRRefreshErrorMessage(
-  errorType: Extract<PRRefreshOutcome, { kind: 'upstream-error' }>['errorType']
-): string {
-  switch (errorType) {
-    case 'rate_limited':
-      return 'GitHub rate limit is low. Try again after the limit resets.'
-    case 'auth':
-      return 'GitHub authentication is unavailable. Check your gh login.'
-    case 'network':
-      return 'GitHub is unreachable right now. Check your network and try again.'
-    case 'permission':
-      return 'GitHub did not allow access to this pull request.'
-    case 'repo_unavailable':
-      return 'The GitHub repository is unavailable or cannot be resolved.'
-    case 'gh_unavailable':
-      return 'GitHub CLI is unavailable.'
-    case 'unknown':
-      return 'GitHub pull request refresh failed.'
   }
 }
 

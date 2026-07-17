@@ -6,6 +6,7 @@ import type {
   HostedReviewCreationBlockedReason,
   HostedReviewCreationEligibility,
   HostedReviewCreationEligibilityArgs,
+  HostedReviewLookupOutcome,
   HostedReviewProvider
 } from '../../shared/hosted-review'
 import {
@@ -475,6 +476,10 @@ export async function getHostedReviewCreationEligibility(
   }
   const baseBranch = defaultBaseRef ? normalizeHostedReviewBaseRef(defaultBaseRef) : null
   let review: Awaited<ReturnType<typeof getHostedReviewForBranch>> = null
+  // Why: a swallowed lookup failure must not masquerade as authoritative
+  // no-review evidence. Track it so the renderer can distinguish an accepted
+  // no-PR result (`not_found`) from a local-blocker fallback (`unavailable`).
+  let lookupFailed = false
   try {
     review = await getHostedReviewForBranch({
       repoPath: args.repoPath,
@@ -500,12 +505,19 @@ export async function getHostedReviewCreationEligibility(
     }
     // Why: local blockers still let the UI offer Create PR preparation; a
     // flaky existing-review lookup should not hide the affordance entirely.
+    lookupFailed = true
     console.warn('Hosted review lookup failed while resolving local review blocker:', error)
   }
 
+  const reviewLookupOutcome: HostedReviewLookupOutcome = review
+    ? 'found'
+    : lookupFailed
+      ? 'unavailable'
+      : 'not_found'
   const baseResult = {
     provider,
     review: review ? { number: review.number, url: review.url } : null,
+    reviewLookupOutcome,
     defaultBaseRef,
     head: branch || null
   }

@@ -60,7 +60,10 @@ export function buildLoadingHostedReviewCreationEligibility(
     review: null,
     canCreate: false,
     blockedReason: null,
-    nextAction: null
+    nextAction: null,
+    // Why: a loading placeholder has not observed an existing-review lookup, so
+    // it can never assert authoritative no-review evidence.
+    reviewLookupOutcome: 'unavailable'
   }
 }
 

@@ -40,6 +40,7 @@ function eligibility(
     canCreate: true,
     blockedReason: null,
     nextAction: null,
+    reviewLookupOutcome: 'not_found',
     defaultBaseRef: 'main',
     title: 'Add feature',
     body: '',
@@ -122,6 +123,32 @@ describe('mobile create form gating parity', () => {
       }) === null
 
     expect(mobileAllowsComposer).toBe(desktopAllowsComposer)
+  })
+
+  it('desktop gate hard-blocks on positive unresolved review evidence', () => {
+    // Mobile lacks review-lookup signals, so it fails closed on ambiguity: the
+    // shared desktop gate must return false even when eligibility looks ready.
+    expect(
+      shouldOpenChecksPanelCreateComposer({
+        activeReview: null,
+        isFolder: false,
+        branch: 'feature/x',
+        hostedReviewCreation: eligibility({ canCreate: true }),
+        reviewLookup: 'positive_unresolved'
+      })
+    ).toBe(false)
+  })
+
+  it('desktop gate hard-blocks during a hard refresh error', () => {
+    expect(
+      shouldOpenChecksPanelCreateComposer({
+        activeReview: null,
+        isFolder: false,
+        branch: 'feature/x',
+        hostedReviewCreation: eligibility({ canCreate: true }),
+        hasHardRefreshError: true
+      })
+    ).toBe(false)
   })
 
   it('stays safely blocked for a reason added by a newer desktop contract', () => {

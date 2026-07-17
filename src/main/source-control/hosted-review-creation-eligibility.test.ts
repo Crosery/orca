@@ -232,6 +232,48 @@ describe('getHostedReviewCreationEligibility', () => {
     })
   })
 
+  it('reports reviewLookupOutcome: found when an existing review is returned', async () => {
+    getHostedReviewForBranchMock.mockResolvedValue({ number: 7, url: 'https://x/pull/7' })
+    await expect(
+      getHostedReviewCreationEligibility({
+        repoPath: '/repo',
+        branch: 'feature/x',
+        hasUncommittedChanges: false,
+        hasUpstream: true,
+        ahead: 0,
+        behind: 0
+      })
+    ).resolves.toMatchObject({ blockedReason: 'existing_review', reviewLookupOutcome: 'found' })
+  })
+
+  it('reports reviewLookupOutcome: not_found when the lookup accepts no review', async () => {
+    getHostedReviewForBranchMock.mockResolvedValue(null)
+    await expect(
+      getHostedReviewCreationEligibility({
+        repoPath: '/repo',
+        branch: 'feature/x',
+        hasUncommittedChanges: false,
+        hasUpstream: true,
+        ahead: 0,
+        behind: 0
+      })
+    ).resolves.toMatchObject({ reviewLookupOutcome: 'not_found' })
+  })
+
+  it('reports reviewLookupOutcome: unavailable when a swallowed lookup failure yields a local blocker', async () => {
+    getHostedReviewForBranchMock.mockRejectedValue(new Error('ssh: connection refused'))
+    await expect(
+      getHostedReviewCreationEligibility({
+        repoPath: '/repo',
+        branch: 'feature/x',
+        hasUncommittedChanges: false,
+        hasUpstream: false,
+        ahead: 0,
+        behind: 0
+      })
+    ).resolves.toMatchObject({ blockedReason: 'no_upstream', reviewLookupOutcome: 'unavailable' })
+  })
+
   // Stacked-worktree base resolution (Change 1/2). `stackedArgs` defaults to a
   // bare local-only parent; `mockRefs` controls the remote-tracking snapshot.
   const stackedArgs = (

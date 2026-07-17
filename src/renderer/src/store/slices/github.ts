@@ -12,6 +12,8 @@ import type {
   GitHubPRRefreshCandidate,
   GitHubPRRefreshEvent,
   GitHubPRRefreshReason,
+  GitHubPRRefreshSkippedReason,
+  PRRefreshErrorType,
   GitHubCommentResult,
   IssueInfo,
   PRCheckDetail,
@@ -659,6 +661,16 @@ export type PRRefreshState = {
   updatedAt: number
   pausedUntil?: number
   message?: string
+  // Classified failure kind on `error` states; drives stable empty-state copy.
+  errorType?: PRRefreshErrorType
+  // Skip cause on `skipped` states; kept distinct from the trigger `reason`.
+  skippedReason?: GitHubPRRefreshSkippedReason
+  // Unified retry schedule (see docs/design/pr-panel-refresh-guidance.md).
+  // `nextAutoRetryAt`: earliest time main expects to auto-retry — drives the
+  // "Orca will retry at {time}" sentence. `retryDisabledUntil`: earliest time a
+  // manual Retry is accepted, set only for rate-limit gates.
+  nextAutoRetryAt?: number
+  retryDisabledUntil?: number
 }
 
 export type PRRefreshStateClearToken = {
@@ -4112,7 +4124,10 @@ export const createGitHubSlice: StateCreator<AppState, [], [], GitHubSlice> = (s
               status: 'error',
               reason: event.reason,
               updatedAt: Date.now(),
-              message: event.outcome.message
+              message: event.outcome.message,
+              errorType: event.outcome.errorType,
+              nextAutoRetryAt: event.outcome.nextAutoRetryAt,
+              retryDisabledUntil: event.outcome.retryDisabledUntil
             }
             continue
           }
@@ -4304,11 +4319,18 @@ export const createGitHubSlice: StateCreator<AppState, [], [], GitHubSlice> = (s
           // Why: delete-then-set moves this key to the end of insertion order so
           // capRecordByInsertionOrder evicts genuinely idle keys, not active ones.
           delete nextStates[alias.cacheKey]
+          const isPaused = event.status === 'paused'
           nextStates[alias.cacheKey] = {
             status: event.status,
             reason: event.reason,
             updatedAt: Date.now(),
-            pausedUntil: event.pausedUntil
+            pausedUntil: event.pausedUntil,
+            skippedReason: event.skippedReason,
+            // Why: a paused refresh is a rate-limit gate. Map its pausedUntil into
+            // the unified schedule so the panel shows the auto-retry time and
+            // disables manual Retry until the limit resets.
+            nextAutoRetryAt: isPaused ? event.pausedUntil : undefined,
+            retryDisabledUntil: isPaused ? event.pausedUntil : undefined
           }
         }
       }

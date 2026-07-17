@@ -1179,21 +1179,35 @@ export type PRInfo = {
   conflictSummary?: PRConflictSummary
 }
 
+/**
+ * Discriminates a classified GitHub PR-refresh failure. The renderer maps these
+ * to stable, non-destructive empty-state copy; a `hard` subset (auth, permission,
+ * repo_unavailable, gh_unavailable) means the existing-review lookup is currently
+ * impossible and must hide the Create composer.
+ */
+export type PRRefreshErrorType =
+  | 'rate_limited'
+  | 'auth'
+  | 'network'
+  | 'permission'
+  | 'repo_unavailable'
+  | 'gh_unavailable'
+  | 'unknown'
+
 export type PRRefreshOutcome =
   | { kind: 'found'; pr: PRInfo; fetchedAt: number }
   | { kind: 'no-pr'; fetchedAt: number }
   | {
       kind: 'upstream-error'
-      errorType:
-        | 'rate_limited'
-        | 'auth'
-        | 'network'
-        | 'permission'
-        | 'repo_unavailable'
-        | 'gh_unavailable'
-        | 'unknown'
+      errorType: PRRefreshErrorType
       message: string
       fetchedAt: number
+      // Unified retry schedule (see docs/design/pr-panel-refresh-guidance.md).
+      // `nextAutoRetryAt`: earliest time main expects to auto-retry this key.
+      // `retryDisabledUntil`: earliest time a manual Retry / refreshPRNow is
+      // accepted (rate-limit gates only, never ordinary network/auth backoff).
+      nextAutoRetryAt?: number
+      retryDisabledUntil?: number
     }
 
 export type GitHubPRRefreshReason = 'visible' | 'active' | 'post-push' | 'manual' | 'swr'
