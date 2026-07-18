@@ -6,8 +6,8 @@ import type {
 import type { TerminalTab } from '../../../../shared/types'
 import type { RetainedAgentEntry } from '@/store/slices/agent-status'
 import { makePaneKey } from '../../../../shared/stable-pane-id'
+import { getLiveEntriesFullRebuildCountForTests } from './worktree-agent-live-index-patch'
 import {
-  getLiveEntriesFullRebuildCountForTests,
   selectLiveAgentStatusEntriesForWorktree,
   selectMigrationUnsupportedEntriesForWorktree,
   selectRuntimeAgentOrchestrationForWorktree,
