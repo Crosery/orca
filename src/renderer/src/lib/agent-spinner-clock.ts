@@ -12,12 +12,12 @@ import {
   registerStaleDocumentVisibilityRecovery
 } from '@/components/terminal-pane/stale-document-visibility'
 
-const SPIN_STEP_DEGREES = 45
+const SPIN_STEP_DEGREES = 30
 const SPIN_STEPS = 360 / SPIN_STEP_DEGREES
-// Why: 3Hz benchmarked cheapest among cadences that still read as rotation;
-// 4Hz and 6Hz both measured worse (timer/vsync alignment), and slower stops
-// reading as "working". Full revolution lands at 2.67s.
-export const AGENT_SPINNER_TICK_MS = 333
+// Why: 30° steps at 6Hz keeps the old animation's step size (spin read as
+// smooth) at half its rate. Above ~8Hz the per-tick JS wakeups cost more than
+// the CSS animation did, defeating the point — do not "smooth" by raising Hz.
+export const AGENT_SPINNER_TICK_MS = 167
 
 const elements = new Set<HTMLElement>()
 let timer: ReturnType<typeof setInterval> | null = null
