@@ -24,6 +24,7 @@ import {
   Trash2
 } from 'lucide-react'
 import { useAppStore } from '@/store'
+import { createLineageToggleHandlerCache } from './worktree-lineage-toggle-handler-cache'
 import { useShallow } from 'zustand/react/shallow'
 import type { AppState } from '@/store/types'
 import {
@@ -2503,6 +2504,12 @@ const VirtualizedWorktreeViewport = React.memo(function VirtualizedWorktreeViewp
     },
     [recordCurrentScrollAnchor, toggleGroup]
   )
+  // Why: memo'd WorktreeCard needs a per-group-key stable onLineageToggle
+  // identity to bail out of re-renders; see worktree-lineage-toggle-handler-cache.
+  const getLineageToggleHandler = useMemo(
+    () => createLineageToggleHandlerCache(toggleGroupWithScrollAnchor),
+    [toggleGroupWithScrollAnchor]
+  )
 
   const navigateWorktree = useCallback(
     (direction: 'up' | 'down') => {
@@ -4930,11 +4937,7 @@ const VirtualizedWorktreeViewport = React.memo(function VirtualizedWorktreeViewp
                     lineageChildrenStyle={lineageChildrenStyle}
                     onLineageToggle={
                       lineageToggleGroupKey
-                        ? (event) => {
-                            event.preventDefault()
-                            event.stopPropagation()
-                            toggleGroupWithScrollAnchor(lineageToggleGroupKey)
-                          }
+                        ? getLineageToggleHandler(lineageToggleGroupKey)
                         : undefined
                     }
                   />
