@@ -239,42 +239,35 @@ import { track } from './telemetry/client'
 import { getCohortAtEmit } from './telemetry/cohort-classifier'
 import { isStartupDiagnosticsEnabled, logStartupDiagnostic } from './startup/startup-diagnostics'
 
-function encrypt(plaintext: string): string {
+function encryptWithStatus(plaintext: string): { value: string; encrypted: boolean } {
   if (!plaintext || !safeStorage.isEncryptionAvailable()) {
-    return plaintext
+    return { value: plaintext, encrypted: false }
   }
   try {
-    return safeStorage.encryptString(plaintext).toString('base64')
+    return { value: safeStorage.encryptString(plaintext).toString('base64'), encrypted: true }
   } catch (err) {
     console.error('[persistence] Encryption failed:', err)
-    return plaintext
+    return { value: plaintext, encrypted: false }
   }
 }
 
-function decrypt(ciphertext: string): string {
+function decryptWithStatus(ciphertext: string): { value: string; decrypted: boolean } {
   if (!ciphertext || !safeStorage.isEncryptionAvailable()) {
-    return ciphertext
+    return { value: ciphertext, decrypted: false }
   }
   try {
-    return safeStorage.decryptString(Buffer.from(ciphertext, 'base64'))
+    return { value: safeStorage.decryptString(Buffer.from(ciphertext, 'base64')), decrypted: true }
   } catch {
-    // Why: if decryption fails, it likely means the value was stored as
-    // plaintext (pre-encryption build) or the OS keychain changed. Fall
-    // back to the raw string so users don't lose their cookie after upgrade.
+    // Why: decryption failure usually means the value predates encryption or the
+    // OS keychain changed; fall back to the raw string so users don't lose it.
     console.warn(
       '[persistence] safeStorage decryption failed — returning ciphertext as-is. Possible keychain reset.'
     )
-    return ciphertext
+    return { value: ciphertext, decrypted: false }
   }
 }
 
-function encryptOptionalSecret(value: string | null | undefined): string | null {
-  return value ? encrypt(value) : null
-}
-
-function decryptOptionalSecret(value: string | null | undefined): string | null {
-  return value ? decrypt(value) : null
-}
+type SecretSlot = 'opencodeSessionCookie' | 'httpProxyUrl' | 'browserKagiSessionLink'
 
 function retireLegacyInstructionsForClearedTextActionRecipes(
   sourceControlAi: GlobalSettings['sourceControlAi'],
@@ -2638,13 +2631,17 @@ export class Store {
   // Why: hash of the plaintext state as of the last successful write. Saves
   // triggered by mutations that net out to identical state skip the full
   // multi-MB serialize + tmp write + rename. Hashing plaintext (not the
-  // written payload) because encrypt() uses a random IV per call, so the
-  // on-disk bytes differ even for identical state.
+  // written payload) because a cache-miss re-encrypt uses a random IV, so the
+  // written bytes aren't guaranteed stable even for identical state.
   private lastWrittenStateHash: string | null = null
   private firstPendingSaveAt: number | null = null
   private githubCacheDirty = false
   private gitUsernameCache = new Map<string, string>()
   private loadNeedsSave = false
+  // Why: safeStorage.encryptString touches the macOS Keychain and can prompt the user.
+  // Reuse the last known ciphertext when a secret's plaintext is unchanged so unrelated
+  // saves (e.g. worktree create) never re-encrypt and never surface a Keychain prompt.
+  private secretCiphertextCache = new Map<SecretSlot, { plaintext: string; ciphertext: string }>()
   private settingsChangeListeners = new Set<
     (
       updates: Partial<GlobalSettings>,
@@ -2886,15 +2883,40 @@ export class Store {
         logPersistenceStartupMilestone('persistence-json-parse-done')
 
         // Why: secret settings are stored encrypted on disk via safeStorage.
-        // Decrypt at the load boundary so the rest of the app sees plaintext.
+        // Decrypt at the load boundary so the rest of the app sees plaintext, and
+        // seed the ciphertext cache so the first save doesn't re-encrypt/re-prompt.
         if (parsed.settings?.opencodeSessionCookie) {
-          parsed.settings.opencodeSessionCookie = decrypt(parsed.settings.opencodeSessionCookie)
+          const rawCiphertext = parsed.settings.opencodeSessionCookie
+          const { value, decrypted } = decryptWithStatus(rawCiphertext)
+          parsed.settings.opencodeSessionCookie = value
+          if (decrypted) {
+            this.secretCiphertextCache.set('opencodeSessionCookie', {
+              plaintext: value,
+              ciphertext: rawCiphertext
+            })
+          }
         }
         if (parsed.settings?.httpProxyUrl) {
-          parsed.settings.httpProxyUrl = decrypt(parsed.settings.httpProxyUrl)
+          const rawCiphertext = parsed.settings.httpProxyUrl
+          const { value, decrypted } = decryptWithStatus(rawCiphertext)
+          parsed.settings.httpProxyUrl = value
+          if (decrypted) {
+            this.secretCiphertextCache.set('httpProxyUrl', {
+              plaintext: value,
+              ciphertext: rawCiphertext
+            })
+          }
         }
         if (parsed.ui?.browserKagiSessionLink) {
-          parsed.ui.browserKagiSessionLink = decryptOptionalSecret(parsed.ui.browserKagiSessionLink)
+          const rawCiphertext = parsed.ui.browserKagiSessionLink
+          const { value, decrypted } = decryptWithStatus(rawCiphertext)
+          parsed.ui.browserKagiSessionLink = value
+          if (decrypted) {
+            this.secretCiphertextCache.set('browserKagiSessionLink', {
+              plaintext: value,
+              ciphertext: rawCiphertext
+            })
+          }
         }
 
         // Merge with defaults in case new fields were added
@@ -3715,6 +3737,26 @@ export class Store {
     return createHash('sha1').update(JSON.stringify(this.getDurableState())).digest('hex')
   }
 
+  private encryptSecretForSave(slot: SecretSlot, plaintext: string): string {
+    if (!plaintext) {
+      this.secretCiphertextCache.delete(slot)
+      return plaintext
+    }
+    const cached = this.secretCiphertextCache.get(slot)
+    if (cached?.plaintext === plaintext) {
+      return cached.ciphertext
+    }
+    const { value, encrypted } = encryptWithStatus(plaintext)
+    // Only memoize a genuine ciphertext; when encryption is unavailable or throws we
+    // cache nothing so the next save retries (unchanged from prior behavior).
+    if (encrypted) {
+      this.secretCiphertextCache.set(slot, { plaintext, ciphertext: value })
+    } else {
+      this.secretCiphertextCache.delete(slot)
+    }
+    return value
+  }
+
   // Why: builds the on-disk payload synchronously so the hash and the
   // serialized bytes reflect the same state tick (no mutation can interleave
   // before an await).
@@ -3725,12 +3767,24 @@ export class Store {
       ...this.getDurableState(),
       settings: {
         ...this.state.settings,
-        opencodeSessionCookie: encrypt(this.state.settings.opencodeSessionCookie),
-        httpProxyUrl: encrypt(this.state.settings.httpProxyUrl ?? '')
+        opencodeSessionCookie: this.encryptSecretForSave(
+          'opencodeSessionCookie',
+          this.state.settings.opencodeSessionCookie
+        ),
+        httpProxyUrl: this.encryptSecretForSave(
+          'httpProxyUrl',
+          this.state.settings.httpProxyUrl ?? ''
+        )
       },
       ui: {
         ...this.state.ui,
-        browserKagiSessionLink: encryptOptionalSecret(this.state.ui.browserKagiSessionLink)
+        // Preserve the existing null-for-empty on-disk shape for this optional field.
+        browserKagiSessionLink: this.state.ui.browserKagiSessionLink
+          ? this.encryptSecretForSave(
+              'browserKagiSessionLink',
+              this.state.ui.browserKagiSessionLink
+            )
+          : null
       }
     }
     // Why compact: ~20-30% fewer bytes (state-shape dependent; measured 21% on

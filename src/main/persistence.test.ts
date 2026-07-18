@@ -103,26 +103,27 @@ const WORKFLOW_DEFAULT_WORKSPACE_STATUSES = [
   { id: 'completed', label: 'Done', color: 'conductor-done', icon: 'conductor-done' }
 ]
 
-const { trackMock, getCohortAtEmitMock } = vi.hoisted(() => ({
+const { trackMock, getCohortAtEmitMock, safeStorageMock } = vi.hoisted(() => ({
   trackMock: vi.fn(),
-  getCohortAtEmitMock: vi.fn()
+  getCohortAtEmitMock: vi.fn(),
+  safeStorageMock: {
+    isEncryptionAvailable: vi.fn(() => true),
+    encryptString: vi.fn((plaintext: string) => Buffer.from(`encrypted:${plaintext}`, 'utf-8')),
+    decryptString: vi.fn((ciphertext: Buffer) => {
+      const decoded = ciphertext.toString('utf-8')
+      if (!decoded.startsWith('encrypted:')) {
+        throw new Error('invalid ciphertext')
+      }
+      return decoded.slice('encrypted:'.length)
+    })
+  }
 }))
 
 vi.mock('electron', () => ({
   app: {
     getPath: () => testState.dir
   },
-  safeStorage: {
-    isEncryptionAvailable: () => true,
-    encryptString: (plaintext: string) => Buffer.from(`encrypted:${plaintext}`, 'utf-8'),
-    decryptString: (ciphertext: Buffer) => {
-      const decoded = ciphertext.toString('utf-8')
-      if (!decoded.startsWith('encrypted:')) {
-        throw new Error('invalid ciphertext')
-      }
-      return decoded.slice('encrypted:'.length)
-    }
-  }
+  safeStorage: safeStorageMock
 }))
 
 vi.mock('./telemetry/client', () => ({
@@ -6069,6 +6070,206 @@ describe('Store', () => {
 
     const store = await createStore()
     expect(store.getUI().browserKagiSessionLink).toBe(sessionLink)
+  })
+
+  describe('safeStorage ciphertext memoization', () => {
+    const mockCiphertext = (plaintext: string) =>
+      Buffer.from(`encrypted:${plaintext}`, 'utf-8').toString('base64')
+
+    afterEach(() => {
+      safeStorageMock.isEncryptionAvailable.mockImplementation(() => true)
+      safeStorageMock.isEncryptionAvailable.mockClear()
+      safeStorageMock.encryptString.mockClear()
+      safeStorageMock.decryptString.mockClear()
+    })
+
+    function writeDataFileWithSecrets() {
+      const ciphertexts = {
+        opencodeSessionCookie: mockCiphertext('cookie-secret'),
+        httpProxyUrl: mockCiphertext('http://proxy:8080'),
+        browserKagiSessionLink: mockCiphertext('https://kagi.com/search?token=secret')
+      }
+      writeDataFile({
+        schemaVersion: 1,
+        repos: [],
+        worktreeMeta: {},
+        settings: {
+          opencodeSessionCookie: ciphertexts.opencodeSessionCookie,
+          httpProxyUrl: ciphertexts.httpProxyUrl
+        },
+        ui: { browserKagiSessionLink: ciphertexts.browserKagiSessionLink },
+        githubCache: { pr: {}, issue: {} },
+        workspaceSession: {}
+      })
+      return ciphertexts
+    }
+
+    it('reuses loaded ciphertext on unrelated saves without re-encrypting', async () => {
+      const ciphertexts = writeDataFileWithSecrets()
+      const store = await createStore()
+      safeStorageMock.encryptString.mockClear()
+
+      store.setWorktreeMeta('r1::/path/wt1', { displayName: 'unrelated change' })
+      store.flush()
+
+      expect(safeStorageMock.encryptString).not.toHaveBeenCalled()
+      const persisted = readDataFile() as {
+        settings: { opencodeSessionCookie: string; httpProxyUrl: string }
+        ui: { browserKagiSessionLink: string }
+      }
+      expect(persisted.settings.opencodeSessionCookie).toBe(ciphertexts.opencodeSessionCookie)
+      expect(persisted.settings.httpProxyUrl).toBe(ciphertexts.httpProxyUrl)
+      expect(persisted.ui.browserKagiSessionLink).toBe(ciphertexts.browserKagiSessionLink)
+    })
+
+    it('encrypts a changed secret exactly once, then reuses the new ciphertext', async () => {
+      writeDataFileWithSecrets()
+      const store = await createStore()
+      safeStorageMock.encryptString.mockClear()
+
+      store.updateSettings({ opencodeSessionCookie: 'new-value' })
+      store.flush()
+      expect(safeStorageMock.encryptString).toHaveBeenCalledTimes(1)
+      expect(safeStorageMock.encryptString).toHaveBeenCalledWith('new-value')
+
+      store.setWorktreeMeta('r1::/path/wt1', { displayName: 'unrelated change' })
+      store.flush()
+      expect(safeStorageMock.encryptString).toHaveBeenCalledTimes(1)
+      const persisted = readDataFile() as { settings: { opencodeSessionCookie: string } }
+      expect(persisted.settings.opencodeSessionCookie).toBe(mockCiphertext('new-value'))
+    })
+
+    it('stores cleared secrets as empty/null without encrypting', async () => {
+      writeDataFileWithSecrets()
+      const store = await createStore()
+      safeStorageMock.encryptString.mockClear()
+
+      store.updateSettings({ opencodeSessionCookie: '' })
+      store.updateUI({ browserKagiSessionLink: null })
+      store.flush()
+
+      expect(safeStorageMock.encryptString).not.toHaveBeenCalled()
+      const persisted = readDataFile() as {
+        settings: { opencodeSessionCookie: string }
+        ui: { browserKagiSessionLink: string | null }
+      }
+      expect(persisted.settings.opencodeSessionCookie).toBe('')
+      expect(persisted.ui.browserKagiSessionLink).toBeNull()
+    })
+
+    it('encrypts a first-ever secret on a fresh store once', async () => {
+      const store = await createStore()
+      safeStorageMock.encryptString.mockClear()
+
+      store.updateSettings({ opencodeSessionCookie: 'fresh-secret' })
+      store.flush()
+
+      expect(safeStorageMock.encryptString).toHaveBeenCalledTimes(1)
+      const persisted = readDataFile() as { settings: { opencodeSessionCookie: string } }
+      expect(persisted.settings.opencodeSessionCookie).toBe(mockCiphertext('fresh-secret'))
+    })
+
+    it('stores plaintext when encryption is unavailable', async () => {
+      safeStorageMock.isEncryptionAvailable.mockImplementation(() => false)
+      const store = await createStore()
+      safeStorageMock.encryptString.mockClear()
+
+      store.updateSettings({ opencodeSessionCookie: 'plain-secret' })
+      store.flush()
+
+      expect(safeStorageMock.encryptString).not.toHaveBeenCalled()
+      const persisted = readDataFile() as { settings: { opencodeSessionCookie: string } }
+      expect(persisted.settings.opencodeSessionCookie).toBe('plain-secret')
+    })
+
+    it('migrates a legacy plaintext secret by encrypting once on the next save', async () => {
+      writeDataFile({
+        schemaVersion: 1,
+        repos: [],
+        worktreeMeta: {},
+        settings: { opencodeSessionCookie: 'legacy-plaintext-cookie' },
+        ui: {},
+        githubCache: { pr: {}, issue: {} },
+        workspaceSession: {}
+      })
+
+      const store = await createStore()
+      expect(store.getSettings().opencodeSessionCookie).toBe('legacy-plaintext-cookie')
+      safeStorageMock.encryptString.mockClear()
+
+      store.setWorktreeMeta('r1::/path/wt1', { displayName: 'unrelated change' })
+      store.flush()
+
+      expect(safeStorageMock.encryptString).toHaveBeenCalledTimes(1)
+      const persisted = readDataFile() as { settings: { opencodeSessionCookie: string } }
+      expect(persisted.settings.opencodeSessionCookie).toBe(
+        mockCiphertext('legacy-plaintext-cookie')
+      )
+    })
+
+    it('does not cache a plaintext fallback after an encrypt failure and retries on the next save', async () => {
+      const store = await createStore()
+      safeStorageMock.encryptString.mockClear()
+      safeStorageMock.encryptString.mockImplementationOnce(() => {
+        throw new Error('kc fail')
+      })
+
+      store.updateSettings({ opencodeSessionCookie: 'secret-value' })
+      store.flush()
+
+      expect(safeStorageMock.encryptString).toHaveBeenCalledTimes(1)
+      let persisted = readDataFile() as { settings: { opencodeSessionCookie: string } }
+      expect(persisted.settings.opencodeSessionCookie).toBe('secret-value')
+
+      // Why: a failed encrypt must not memoize plaintext-as-ciphertext, so an
+      // unrelated save retries encryption of the unchanged secret.
+      store.setWorktreeMeta('r1::/path/wt1', { displayName: 'unrelated change' })
+      store.flush()
+
+      expect(safeStorageMock.encryptString).toHaveBeenCalledTimes(2)
+      persisted = readDataFile() as { settings: { opencodeSessionCookie: string } }
+      expect(persisted.settings.opencodeSessionCookie).toBe(mockCiphertext('secret-value'))
+      expect(
+        safeStorageMock.decryptString(
+          Buffer.from(persisted.settings.opencodeSessionCookie, 'base64')
+        )
+      ).toBe('secret-value')
+    })
+
+    it('passes stored secrets through untouched while encryption is unavailable at load', async () => {
+      writeDataFile({
+        schemaVersion: 1,
+        repos: [],
+        worktreeMeta: {},
+        settings: { opencodeSessionCookie: 'plain-stored-cookie' },
+        ui: {},
+        githubCache: { pr: {}, issue: {} },
+        workspaceSession: {}
+      })
+      safeStorageMock.isEncryptionAvailable.mockImplementation(() => false)
+
+      const store = await createStore()
+      expect(store.getSettings().opencodeSessionCookie).toBe('plain-stored-cookie')
+      expect(safeStorageMock.decryptString).not.toHaveBeenCalled()
+      safeStorageMock.encryptString.mockClear()
+
+      store.setWorktreeMeta('r1::/path/wt1', { displayName: 'unrelated change' })
+      store.flush()
+
+      expect(safeStorageMock.encryptString).not.toHaveBeenCalled()
+      let persisted = readDataFile() as { settings: { opencodeSessionCookie: string } }
+      expect(persisted.settings.opencodeSessionCookie).toBe('plain-stored-cookie')
+
+      // Why: once encryption becomes available the still-uncached secret must
+      // be encrypted on the next save rather than staying plaintext forever.
+      safeStorageMock.isEncryptionAvailable.mockImplementation(() => true)
+      store.setWorktreeMeta('r1::/path/wt2', { displayName: 'another change' })
+      store.flush()
+
+      expect(safeStorageMock.encryptString).toHaveBeenCalledTimes(1)
+      persisted = readDataFile() as { settings: { opencodeSessionCookie: string } }
+      expect(persisted.settings.opencodeSessionCookie).toBe(mockCiphertext('plain-stored-cookie'))
+    })
   })
 
   it('preserves persisted smart sort value', async () => {
