@@ -12,6 +12,7 @@ const {
   spawnMock,
   prepareMacosTccLoginShellMock,
   resolveAgentForegroundProcessMock,
+  readWindowsConptyProcessIdsMock,
   captureDescendantSnapshotMock,
   terminateDescendantSnapshotMock
 } = vi.hoisted(() => ({
@@ -23,6 +24,7 @@ const {
   spawnMock: vi.fn(),
   prepareMacosTccLoginShellMock: vi.fn(),
   resolveAgentForegroundProcessMock: vi.fn(),
+  readWindowsConptyProcessIdsMock: vi.fn(),
   captureDescendantSnapshotMock: vi.fn(),
   terminateDescendantSnapshotMock: vi.fn()
 }))
@@ -77,6 +79,10 @@ vi.mock('./windows-powershell-executable', () => ({
 vi.mock('./agent-foreground-process', () => ({
   resolveAgentForegroundProcessWithAvailability: (...args: unknown[]) =>
     resolveAgentForegroundProcessMock(...args)
+}))
+
+vi.mock('./windows-conpty-process-membership', () => ({
+  readWindowsConptyProcessIds: (...args: unknown[]) => readWindowsConptyProcessIdsMock(...args)
 }))
 
 vi.mock('../wsl', () => ({
@@ -156,6 +162,8 @@ describe('LocalPtyProvider', () => {
         processName: fallbackProcess
       })
     )
+    readWindowsConptyProcessIdsMock.mockReset()
+    readWindowsConptyProcessIdsMock.mockResolvedValue(null)
 
     exitCb = undefined
     mockProc = {
@@ -1426,6 +1434,40 @@ describe('LocalPtyProvider', () => {
       resolveScan({ available: true, processName: 'droid' })
 
       await expect(foreground).resolves.toBeNull()
+    })
+
+    it('confirms a still-active agent from ConPTY console presence without a whole-table scan', async () => {
+      Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' })
+      mockProc.process = 'powershell.exe'
+      resolveAgentForegroundProcessMock.mockResolvedValue({
+        available: true,
+        processName: 'claude'
+      })
+      // A child beyond the shell is still attached to this console.
+      readWindowsConptyProcessIdsMock.mockResolvedValue(new Set([12345, 999]))
+      const { id } = await provider.spawn({ cols: 80, rows: 24 })
+
+      // First call establishes the agent identity via the scan.
+      await expect(provider.getForegroundProcess(id)).resolves.toBe('claude')
+      // node-pty still only names the shell, but console presence confirms the
+      // agent — no second whole-table scan.
+      await expect(provider.getForegroundProcess(id)).resolves.toBe('claude')
+      expect(resolveAgentForegroundProcessMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('falls through to the scan when the ConPTY console shows only the shell', async () => {
+      Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' })
+      mockProc.process = 'powershell.exe'
+      resolveAgentForegroundProcessMock.mockResolvedValue({
+        available: true,
+        processName: 'claude'
+      })
+      readWindowsConptyProcessIdsMock.mockResolvedValue(null)
+      const { id } = await provider.spawn({ cols: 80, rows: 24 })
+
+      await expect(provider.getForegroundProcess(id)).resolves.toBe('claude')
+      await expect(provider.getForegroundProcess(id)).resolves.toBe('claude')
+      expect(resolveAgentForegroundProcessMock).toHaveBeenCalledTimes(2)
     })
   })
 

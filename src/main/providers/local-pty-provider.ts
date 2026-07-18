@@ -61,6 +61,7 @@ import {
   terminateDescendantSnapshot
 } from '../pty-descendant-termination'
 import { readWindowsConptyProcessIds } from './windows-conpty-process-membership'
+import { canConfirmAgentFromConsolePresence } from './windows-console-foreground'
 import { forceKillPosixPtyProcessGroups } from '../pty/posix-pty-process-groups'
 import { shouldUseShellReadyStartupDelivery } from '../../shared/codex-startup-delivery'
 import { assertSafeAgentStartupCwd, resolveSafePtyDefaultCwd } from './pty-default-cwd'
@@ -1234,10 +1235,37 @@ export class LocalPtyProvider implements IPtyProvider {
       ptyLastRecognizedForeground.delete(id)
       return null
     }
+    const fallbackProcess = resolveForegroundFallbackProcess(
+      proc.process || null,
+      ptyShellName.get(id)
+    )
+    const cachedAgent = ptyLastRecognizedForeground.get(id) ?? null
+    // Why: while a recognized agent is still active in this ConPTY, a cheap
+    // console-membership read confirms it without the whole-table scan that,
+    // under load, times out or returns an incomplete snapshot and makes the
+    // completion coordinator fire a false "agent done". A child still attached
+    // to this console means the agent is working; fall through to the
+    // authoritative scan only when the console is shell-only (agent likely gone).
+    if (
+      process.platform === 'win32' &&
+      canConfirmAgentFromConsolePresence(cachedAgent, fallbackProcess)
+    ) {
+      try {
+        const consoleProcessIds = await readWindowsConptyProcessIds(proc.pid)
+        if (ptyProcesses.get(id) !== proc) {
+          return null
+        }
+        if (consoleProcessIds !== null && cachedAgent !== null) {
+          return cachedAgent
+        }
+      } catch {
+        // Fall through to the authoritative scan on any console-read failure.
+      }
+    }
     try {
       const resolution = await resolveAgentForegroundProcessWithAvailability(
         proc.pid,
-        resolveForegroundFallbackProcess(proc.process || null, ptyShellName.get(id)),
+        fallbackProcess,
         {
           contextPaths: ptyAgentForegroundContextPaths.get(id)
         }
