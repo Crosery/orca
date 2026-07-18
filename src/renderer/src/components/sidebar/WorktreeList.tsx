@@ -25,6 +25,7 @@ import {
 } from 'lucide-react'
 import { useAppStore } from '@/store'
 import { createLineageToggleHandlerCache } from './worktree-lineage-toggle-handler-cache'
+import { reuseArrayIfEqual } from './worktree-agent-row-selectors'
 import { useShallow } from 'zustand/react/shallow'
 import type { AppState } from '@/store/types'
 import {
@@ -311,6 +312,19 @@ type ProjectGroupDeleteDialogState = {
   groupId: string
   groupName: string
   removeContainedProjects: boolean
+}
+
+// Why: epoch-driven recomputes (agent status, sort) often produce arrays whose
+// contents and order are unchanged. Reusing the previous identity when
+// element-wise equal keeps downstream memos and React.memo'd cards bailing out.
+// Safe because the elements (Worktree objects / id strings) are immutably
+// REPLACED on any change — a `===`-equal element means the rendered data is
+// unchanged. Do not use this to wrap arrays of mutated-in-place objects.
+function useReusedArrayIdentity<T>(next: T[]): T[] {
+  const previousRef = useRef<T[]>(next)
+  const result = reuseArrayIfEqual(previousRef.current, next)
+  previousRef.current = result
+  return result
 }
 
 // How long to wait after a sortEpoch bump before actually re-sorting.
@@ -5597,7 +5611,7 @@ const WorktreeList = React.memo(function WorktreeList({
 
   // Flatten, filter, and apply stable sort order via the shared utility so
   // the card order always matches the Cmd+1–9 shortcut numbering.
-  const visibleWorktrees = useMemo(() => {
+  const recomputedVisibleWorktrees = useMemo(() => {
     void agentStatusEpoch
     const ids = computeVisibleWorktreeIds(worktreesByRepo, sortedIds, {
       filterRepoIds,
@@ -5652,6 +5666,10 @@ const WorktreeList = React.memo(function WorktreeList({
     worktreeLineageById,
     worktreesByRepo
   ])
+  // Why: agentStatusEpoch bumps recompute this memo even when membership and
+  // order are unchanged; keeping the previous identity stops the whole
+  // rows/sectionRows/renderedWorktrees chain from churning per epoch.
+  const visibleWorktrees = useReusedArrayIdentity(recomputedVisibleWorktrees)
 
   const worktrees = visibleWorktrees
   const collapsedGroups = useAppStore((s) => s.collapsedGroups)
@@ -5993,9 +6011,14 @@ const WorktreeList = React.memo(function WorktreeList({
     () => getRenderedWorktreesInSidebarOrder(sectionRows, pinnedDisplayPolicy),
     [pinnedDisplayPolicy, sectionRows]
   )
-  const renderedWorktreeIds = useMemo(
-    () => uniqueWorktreeIds(renderedWorktrees.map((worktree) => worktree.id)),
-    [renderedWorktrees]
+  // Why: order-preserving sectionRows rebuilds must not give this array a new
+  // identity — updateSelectionForGesture depends on it, and a fresh identity
+  // there defeats React.memo bail-out for every WorktreeCard on epoch bumps.
+  const renderedWorktreeIds = useReusedArrayIdentity(
+    useMemo(
+      () => uniqueWorktreeIds(renderedWorktrees.map((worktree) => worktree.id)),
+      [renderedWorktrees]
+    )
   )
   const [selectedWorktreeIds, setSelectedWorktreeIds] = useState<Set<string>>(new Set())
   const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null)
@@ -6014,18 +6037,23 @@ const WorktreeList = React.memo(function WorktreeList({
     setSelectionAnchorId(prunedSelection.anchorId)
   }
 
-  const selectedWorktrees = useMemo(() => {
-    if (selectedWorktreeIds.size === 0) {
-      return []
-    }
-    const selected = new Map<string, Worktree>()
-    for (const worktree of renderedWorktrees) {
-      if (selectedWorktreeIds.has(worktree.id) && !selected.has(worktree.id)) {
-        selected.set(worktree.id, worktree)
+  // Why identity reuse: the empty/unchanged-selection case must keep one array
+  // identity — selectForContextMenu and both drag-start handlers depend on
+  // this array, and card memo bail-out depends on those staying stable.
+  const selectedWorktrees = useReusedArrayIdentity(
+    useMemo(() => {
+      if (selectedWorktreeIds.size === 0) {
+        return []
       }
-    }
-    return Array.from(selected.values())
-  }, [renderedWorktrees, selectedWorktreeIds])
+      const selected = new Map<string, Worktree>()
+      for (const worktree of renderedWorktrees) {
+        if (selectedWorktreeIds.has(worktree.id) && !selected.has(worktree.id)) {
+          selected.set(worktree.id, worktree)
+        }
+      }
+      return Array.from(selected.values())
+    }, [renderedWorktrees, selectedWorktreeIds])
+  )
 
   useEffect(() => {
     if (selectedWorktreeIds.size === 0) {

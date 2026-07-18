@@ -51,7 +51,10 @@ let liveEntriesByWorktreeCache: LiveEntriesByWorktreeCache | null = null
 let migrationUnsupportedByWorktreeCache: MigrationUnsupportedByWorktreeCache | null = null
 let retainedEntriesByWorktreeCache: RetainedEntriesByWorktreeCache | null = null
 
-function reuseArrayIfEqual<T>(previous: T[] | undefined, next: T[]): T[] {
+// Why exported: WorktreeList reuses this exact-equality identity check to keep
+// derived arrays referentially stable across order-preserving epoch bumps so
+// memo'd cards can bail out of re-render.
+export function reuseArrayIfEqual<T>(previous: T[] | undefined, next: T[]): T[] {
   if (!previous || previous.length !== next.length) {
     return next
   }
