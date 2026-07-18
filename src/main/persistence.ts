@@ -268,10 +268,6 @@ function decrypt(ciphertext: string): string {
   }
 }
 
-function encryptOptionalSecret(value: string | null | undefined): string | null {
-  return value ? encrypt(value) : null
-}
-
 function decryptOptionalSecret(value: string | null | undefined): string | null {
   return value ? decrypt(value) : null
 }
@@ -2635,11 +2631,11 @@ export class Store {
   // its back, the stale in-memory state must never be persisted again — a
   // late sync flush before the relaunch would resurrect the moved project.
   private writesFrozen = false
-  // Why: hash of the plaintext state as of the last successful write. Saves
-  // triggered by mutations that net out to identical state skip the full
-  // multi-MB serialize + tmp write + rename. Hashing plaintext (not the
-  // written payload) because encrypt() uses a random IV per call, so the
-  // on-disk bytes differ even for identical state.
+  // Why: content hash as of the last successful write. Saves triggered by
+  // mutations that net out to identical state skip the tmp write + rename.
+  // Derived from the payload with encrypted blobs normalized back to
+  // plaintext (see buildStateToSave), because encrypt() uses a random IV per
+  // call, so the raw on-disk bytes differ even for identical state.
   private lastWrittenStateHash: string | null = null
   private firstPendingSaveAt: number | null = null
   private githubCacheDirty = false
@@ -3711,32 +3707,56 @@ export class Store {
     return durable
   }
 
-  private computeStateHash(): string {
-    return createHash('sha1').update(JSON.stringify(this.getDurableState())).digest('hex')
-  }
-
   // Why: builds the on-disk payload synchronously so the hash and the
   // serialized bytes reflect the same state tick (no mutation can interleave
-  // before an await).
-  private buildStateToSave(): string {
+  // before an await). The guard hash is derived from this same payload string
+  // (one full-state stringify per save, not two): encrypt() uses a random IV,
+  // so the non-deterministic ciphertext blobs are substituted back to their
+  // plaintext values before hashing to keep the hash a pure function of state.
+  private buildStateToSave(): { payload: string; stateHash: string } {
+    // Why: track (ciphertext, plaintext) pairs so the hash input can be
+    // normalized. Blobs equal to their plaintext (empty secret, or
+    // safeStorage unavailable) are already deterministic — never recorded,
+    // which also rules out any empty-string replace.
+    const blobPairs: { blob: string; plaintext: string }[] = []
+    const encryptTracked = (plaintext: string): string => {
+      const blob = encrypt(plaintext)
+      if (blob !== plaintext) {
+        blobPairs.push({ blob, plaintext })
+      }
+      return blob
+    }
     // Why: secrets must be encrypted on disk. Clone state so the in-memory
     // this.state stays plaintext for the rest of the app.
     const stateToSave = {
       ...this.getDurableState(),
       settings: {
         ...this.state.settings,
-        opencodeSessionCookie: encrypt(this.state.settings.opencodeSessionCookie),
-        httpProxyUrl: encrypt(this.state.settings.httpProxyUrl ?? '')
+        opencodeSessionCookie: encryptTracked(this.state.settings.opencodeSessionCookie),
+        httpProxyUrl: encryptTracked(this.state.settings.httpProxyUrl ?? '')
       },
       ui: {
         ...this.state.ui,
-        browserKagiSessionLink: encryptOptionalSecret(this.state.ui.browserKagiSessionLink)
+        browserKagiSessionLink: this.state.ui.browserKagiSessionLink
+          ? encryptTracked(this.state.ui.browserKagiSessionLink)
+          : null
       }
     }
     // Why compact: ~20-30% fewer bytes (state-shape dependent; measured 21% on
     // real state) and less serialize time on the sync-flush path; all readers
     // JSON.parse, so on-disk formatting is irrelevant.
-    return JSON.stringify(stateToSave)
+    const payload = JSON.stringify(stateToSave)
+    // Why replace is safe: each blob is base64 of a random-IV ciphertext (an
+    // effectively unique ≥128-bit string), base64 chars are never JSON-escaped
+    // so the blob appears verbatim, and the function replacement keeps `$`
+    // patterns in secrets inert.
+    let hashInput = payload
+    for (const { blob, plaintext } of blobPairs) {
+      const escapedPlaintext = JSON.stringify(plaintext).slice(1, -1)
+      hashInput = hashInput.replace(blob, () => escapedPlaintext)
+    }
+    const stateHash = createHash('sha1').update(hashInput).digest('hex')
+    return { payload, stateHash }
   }
 
   // Why: async writes avoid blocking the main Electron thread on every
@@ -3746,13 +3766,12 @@ export class Store {
       return
     }
     const gen = this.writeGeneration
-    const stateHash = this.computeStateHash()
+    const { payload, stateHash } = this.buildStateToSave()
     // Why: a mutation burst that nets out to already-persisted state (or a
     // flush that raced ahead) must not rewrite a byte-identical multi-MB file.
     if (stateHash === this.lastWrittenStateHash) {
       return
     }
-    const payload = this.buildStateToSave()
     const dataFile = this.dataFile
     const dir = dirname(dataFile)
     await mkdir(dir, { recursive: true }).catch(() => {})
@@ -3801,7 +3820,7 @@ export class Store {
     if (this.writesFrozen) {
       return
     }
-    const stateHash = this.computeStateHash()
+    const { payload, stateHash } = this.buildStateToSave()
     // Why: skipping is safe under flushOrThrow's durability contract — a
     // matching hash means this exact state is already the file's content.
     // Except when an async write was in flight at flush entry (force): its
@@ -3816,8 +3835,6 @@ export class Store {
       mkdirSync(dir, { recursive: true })
     }
     const tmpFile = `${dataFile}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`
-
-    const payload = this.buildStateToSave()
 
     // Why: mirror the async path — on any failure between writeFileSync and
     // renameSync, remove the tmp file so crashes during shutdown don't leak
