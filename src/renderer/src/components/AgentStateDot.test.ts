@@ -22,9 +22,12 @@ describe('AgentStateDot', () => {
 
     expect(markup).toContain('border-yellow-500')
     expect(markup).toContain('border-t-transparent')
-    expect(markup).toContain('[animation:spin_1s_steps(12,end)_infinite]')
-    expect(markup).toContain('motion-reduce:animate-none')
+    // Why: rotation comes from the shared agent-spinner clock (which also
+    // honors prefers-reduced-motion), not a per-element CSS animation that
+    // would keep the compositor awake.
+    expect(markup).toContain('data-agent-spinner')
     expect(markup).not.toContain('animate-spin')
+    expect(markup).not.toContain('animation:spin')
   })
 
   it('renders done as an emerald check icon', () => {

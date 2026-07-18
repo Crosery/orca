@@ -307,6 +307,21 @@ export function createMainWindow(
     })
   }
 
+  // Why: with background throttling disabled (above), Chromium pins the
+  // renderer's document.visibilityState to 'visible', so renderer-side
+  // visibility gates (e.g. the shared agent-spinner clock) never learn the
+  // window was hidden or minimized. Relay the window's real visibility so
+  // those gates work on macOS too.
+  const sendWindowVisibility = (visible: boolean): void => {
+    if (!mainWindow.isDestroyed() && mainWindow.webContents.isDestroyed?.() !== true) {
+      mainWindow.webContents.send('window:visibility-changed', visible)
+    }
+  }
+  mainWindow.on('hide', () => sendWindowVisibility(false))
+  mainWindow.on('minimize', () => sendWindowVisibility(false))
+  mainWindow.on('show', () => sendWindowVisibility(true))
+  mainWindow.on('restore', () => sendWindowVisibility(true))
+
   // Why: a focus-preserving system/display wake fires no window focus or
   // visibility events in the renderer, so terminal wake recovery would never
   // run. Relay powerMonitor resume explicitly (supported on mac/win/linux)

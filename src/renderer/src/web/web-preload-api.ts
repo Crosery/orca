@@ -2559,6 +2559,9 @@ function createWebUiApi(): NonNullable<Partial<PreloadApi>['ui']> {
     // Why: a paired web client has no OS sleep signal; occlusion-driven
     // visibilitychange already covers its wake recovery.
     onSystemResumed: () => noopUnsubscribe,
+    // Why: a paired web client has real document visibility; the desktop-only
+    // main-window hide/show relay does not apply.
+    onWindowVisibilityChanged: () => noopUnsubscribe,
     onFileDrop: () => noopUnsubscribe,
     syncTrafficLights: () => {},
     setMarkdownEditorFocused: () => {},

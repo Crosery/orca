@@ -3816,6 +3816,14 @@ const api = {
       ipcRenderer.on('system:resumed', listener)
       return () => ipcRenderer.removeListener('system:resumed', listener)
     },
+    /** Fired on window hide/minimize/show/restore. Needed on macOS, where
+     *  disabled background throttling pins document.visibilityState to
+     *  'visible' and visibilitychange never fires for a hidden window. */
+    onWindowVisibilityChanged: (callback: (visible: boolean) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, visible: boolean) => callback(visible)
+      ipcRenderer.on('window:visibility-changed', listener)
+      return () => ipcRenderer.removeListener('window:visibility-changed', listener)
+    },
     /** Desktop custom titlebar only: minimize via renderer-drawn window controls. */
     minimize: (): void => {
       ipcRenderer.send('window:minimize')
