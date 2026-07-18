@@ -51,6 +51,13 @@ let liveEntriesByWorktreeCache: LiveEntriesByWorktreeCache | null = null
 let migrationUnsupportedByWorktreeCache: MigrationUnsupportedByWorktreeCache | null = null
 let retainedEntriesByWorktreeCache: RetainedEntriesByWorktreeCache | null = null
 
+// Why: test-only observability — proves same-key entry updates (per-ping
+// setAgentStatus map churn) take the O(changed) patch path, not a full rebuild.
+let liveEntriesFullRebuildCount = 0
+export function getLiveEntriesFullRebuildCountForTests(): number {
+  return liveEntriesFullRebuildCount
+}
+
 function reuseArrayIfEqual<T>(previous: T[] | undefined, next: T[]): T[] {
   if (!previous || previous.length !== next.length) {
     return next
@@ -79,6 +86,90 @@ function getTabIdToWorktreeId(
   return tabIdToWorktreeId
 }
 
+// Why: keep early attributed child rows, but hide completed rows once their tab is gone.
+function liveEntryWorktreeId(
+  paneKey: string,
+  entry: AgentStatusEntry,
+  tabIdToWorktreeId: Map<string, string>
+): string | undefined {
+  const parsed = parsePaneKey(paneKey)
+  if (!parsed) {
+    return undefined
+  }
+  const tabWorktreeId = tabIdToWorktreeId.get(parsed.tabId)
+  return tabWorktreeId ?? (entry.state === 'done' ? undefined : entry.worktreeId)
+}
+
+/**
+ * Patches the cached by-worktree index in place of a full rebuild when the
+ * live map changed only by replacing entries under existing pane keys with
+ * the same bucketing (worktree attribution and done-ness).
+ *
+ * Why: setAgentStatus mints a new agentStatusByPaneKey on EVERY status ping,
+ * including same-state working prompt/tool updates. Rebuilding the whole
+ * index (parsePaneKey + bucketing across all live agents) per ping is the
+ * dominant selector cost under parallel agents; a within-state ping only
+ * needs the owning worktree's bucket refreshed.
+ */
+function patchLiveEntriesByWorktree(
+  cache: LiveEntriesByWorktreeCache,
+  agentStatusByPaneKey: WorktreeAgentRowsState['agentStatusByPaneKey'],
+  tabIdToWorktreeId: Map<string, string>
+): Map<string, AgentStatusEntry[]> | null {
+  const previousMap = cache.agentStatusByPaneKey
+  const changed: Array<{ paneKey: string; entry: AgentStatusEntry }> = []
+  let keyCount = 0
+  for (const paneKey in agentStatusByPaneKey) {
+    keyCount += 1
+    const entry = agentStatusByPaneKey[paneKey]
+    const previous = previousMap[paneKey]
+    if (previous === entry) {
+      continue
+    }
+    // Why: bail on added keys or bucket-determinant changes — the bucket rule
+    // depends only on paneKey, the (reference-equal) tab index, worktree
+    // attribution, and done-ness, so equal determinants mean the same bucket.
+    if (
+      previous === undefined ||
+      previous.worktreeId !== entry.worktreeId ||
+      (previous.state === 'done') !== (entry.state === 'done')
+    ) {
+      return null
+    }
+    changed.push({ paneKey, entry })
+  }
+  if (keyCount !== Object.keys(previousMap).length) {
+    // Why: removed keys need buckets dropped; leave that to the full rebuild.
+    return null
+  }
+  if (changed.length === 0) {
+    return cache.entriesByWorktree
+  }
+
+  const entriesByWorktree = new Map(cache.entriesByWorktree)
+  const clonedBuckets = new Set<string>()
+  for (const { paneKey, entry } of changed) {
+    const worktreeId = liveEntryWorktreeId(paneKey, entry, tabIdToWorktreeId)
+    if (!worktreeId) {
+      continue
+    }
+    const bucket = entriesByWorktree.get(worktreeId)
+    const index = bucket?.indexOf(previousMap[paneKey]) ?? -1
+    if (!bucket || index < 0) {
+      return null
+    }
+    const nextBucket = clonedBuckets.has(worktreeId) ? bucket : bucket.slice()
+    // Why: in-position replacement preserves iteration order, matching what a
+    // full rebuild would produce (spread updates keep object insertion order).
+    nextBucket[index] = entry
+    if (!clonedBuckets.has(worktreeId)) {
+      clonedBuckets.add(worktreeId)
+      entriesByWorktree.set(worktreeId, nextBucket)
+    }
+  }
+  return entriesByWorktree
+}
+
 function getLiveEntriesByWorktree(state: WorktreeAgentRowsState): Map<string, AgentStatusEntry[]> {
   const agentStatusByPaneKey = state.agentStatusByPaneKey ?? EMPTY_RECORD
   const tabsByWorktree = state.tabsByWorktree ?? EMPTY_RECORD
@@ -90,16 +181,26 @@ function getLiveEntriesByWorktree(state: WorktreeAgentRowsState): Map<string, Ag
   }
 
   const tabIdToWorktreeId = getTabIdToWorktreeId(tabsByWorktree)
+  if (liveEntriesByWorktreeCache?.tabsByWorktree === tabsByWorktree) {
+    const patched = patchLiveEntriesByWorktree(
+      liveEntriesByWorktreeCache,
+      agentStatusByPaneKey,
+      tabIdToWorktreeId
+    )
+    if (patched) {
+      liveEntriesByWorktreeCache = {
+        tabsByWorktree,
+        agentStatusByPaneKey,
+        entriesByWorktree: patched
+      }
+      return patched
+    }
+  }
+  liveEntriesFullRebuildCount += 1
   const previous = liveEntriesByWorktreeCache?.entriesByWorktree
   const entriesByWorktree = new Map<string, AgentStatusEntry[]>()
   for (const [paneKey, entry] of Object.entries(agentStatusByPaneKey)) {
-    const parsed = parsePaneKey(paneKey)
-    if (!parsed) {
-      continue
-    }
-    const tabWorktreeId = tabIdToWorktreeId.get(parsed.tabId)
-    // Why: keep early attributed child rows, but hide completed rows once their tab is gone.
-    const worktreeId = tabWorktreeId ?? (entry.state === 'done' ? undefined : entry.worktreeId)
+    const worktreeId = liveEntryWorktreeId(paneKey, entry, tabIdToWorktreeId)
     if (!worktreeId) {
       continue
     }
