@@ -11,6 +11,7 @@ import { mintPtySessionId, parsePtySessionId } from './pty-session-id'
 import { supportsPtyStartupBarrier } from './shell-ready'
 import { CODEX_SHELL_READY_TIMEOUT_MS } from './session'
 import {
+  CLEAN_DISCONNECT_PROTOCOL_VERSION,
   GIT_CREDENTIAL_GUARD_HOST_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
   type CreateOrAttachResult,
@@ -918,6 +919,15 @@ export class DaemonPtyAdapter implements IPtyProvider {
     this.client.disconnect()
   }
 
+  async establishLifecycleLease(): Promise<void> {
+    if (this.protocolVersion < CLEAN_DISCONNECT_PROTOCOL_VERSION) {
+      return
+    }
+    // Why: an authenticated pair cancels a crash deadline and gives a never-used
+    // adapter enough authority to retire its empty daemon during clean quit.
+    await this.client.ensureConnected()
+  }
+
   // Why: for in-process daemon mode, disconnect without flushing history.
   // dispose() writes endedAt for all sessions, which would prevent cold
   // restore. disconnectOnly() leaves history files in unclean state so
@@ -950,6 +960,19 @@ export class DaemonPtyAdapter implements IPtyProvider {
     this.producerResumesOwedOnReconnect.clear()
     this.removeEventListener?.()
     this.removeEventListener = null
+    if (this.protocolVersion >= CLEAN_DISCONNECT_PROTOCOL_VERSION) {
+      try {
+        // Why: only the authenticated daemon can atomically prove it is empty;
+        // one shared budget keeps a first connection plus retirement off quit's critical path.
+        const deadlineMs = Date.now() + 250
+        if (!this.client.isConnected()) {
+          await this.client.ensureConnectedWithin(Math.max(1, deadlineMs - Date.now()))
+        }
+        await this.client.request('shutdownIfIdle', undefined, Math.max(1, deadlineMs - Date.now()))
+      } catch {
+        // An unreachable daemon falls back to its unexpected-disconnect grace.
+      }
+    }
     this.client.disconnect()
   }
 
@@ -1237,7 +1260,11 @@ export class DaemonPtyAdapter implements IPtyProvider {
     try {
       return await fn()
     } catch (err) {
-      if (!this.respawnFn || !isDaemonGoneError(err)) {
+      // Why: self-retirement removes the token only after an authenticated
+      // endpoint dropped; an initial missing token may still hide a live daemon.
+      const missingRetiredEndpointToken =
+        isMissingTokenFileError(err) && this.client.hasObservedAuthenticatedDisconnect()
+      if (!this.respawnFn || (!isDaemonGoneError(err) && !missingRetiredEndpointToken)) {
         throw err
       }
       if (!this.respawnPromise) {
@@ -1414,5 +1441,18 @@ function isDaemonGoneError(err: unknown): boolean {
     return true
   }
   const msg = err.message
-  return msg === 'Connection lost' || msg === 'Not connected' || msg === 'Hello response timed out'
+  return (
+    msg === 'Connection lost' ||
+    msg === 'Not connected' ||
+    msg === 'Hello response timed out' ||
+    msg === 'Daemon temporarily unavailable; reconnect'
+  )
+}
+
+function isMissingTokenFileError(err: unknown): boolean {
+  if (!(err instanceof Error)) {
+    return false
+  }
+  const errno = err as NodeJS.ErrnoException
+  return errno.code === 'ENOENT' && errno.syscall === 'open'
 }

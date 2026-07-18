@@ -2,13 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { connect, type Server, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { existsSync, mkdtempSync, rmSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
 import { DaemonServer } from './daemon-server'
 import { DaemonClient } from './client'
 import { encodeNdjson } from './ndjson'
 import { PROTOCOL_VERSION, type DaemonRequest } from './types'
 import type { SubprocessHandle } from './session'
-import { getDaemonSocketPath } from './daemon-spawner'
+import { getDaemonPidPath, getDaemonSocketPath, serializeDaemonPidFile } from './daemon-spawner'
 
 const confirmForegroundProcessMock = vi.fn(async () => 'droid')
 
@@ -67,6 +67,7 @@ describe('DaemonServer', () => {
   let dir: string
   let socketPath: string
   let tokenPath: string
+  let pidPath: string
   let server: DaemonServer
   let client: DaemonClient
 
@@ -75,6 +76,7 @@ describe('DaemonServer', () => {
     dir = createTestDir()
     socketPath = getDaemonSocketPath(dir)
     tokenPath = join(dir, 'test.token')
+    pidPath = getDaemonPidPath(dir)
   })
 
   afterEach(async () => {
@@ -83,10 +85,11 @@ describe('DaemonServer', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  async function startServer(): Promise<void> {
+  async function startServer(launchNonce?: string): Promise<void> {
     server = new DaemonServer({
       socketPath,
       tokenPath,
+      ...(launchNonce ? { pidPath, launchNonce } : {}),
       spawnSubprocess: () => createMockSubprocess()
     })
     await server.start()
@@ -780,6 +783,41 @@ describe('DaemonServer', () => {
   })
 
   describe('shutdown', () => {
+    it('removes only its owned token and PID record', async () => {
+      const launchNonce = 'ordinary-shutdown'
+      writeFileSync(
+        pidPath,
+        serializeDaemonPidFile({ pid: process.pid, startedAtMs: null, launchNonce })
+      )
+      await startServer(launchNonce)
+
+      await server.shutdown()
+
+      expect(existsSync(tokenPath)).toBe(false)
+      expect(existsSync(pidPath)).toBe(false)
+    })
+
+    it('preserves token and PID artifacts replaced before ordinary cleanup', async () => {
+      await startServer('mine')
+      writeFileSync(tokenPath, 'replacement-token')
+      writeFileSync(
+        pidPath,
+        serializeDaemonPidFile({
+          pid: process.pid,
+          startedAtMs: null,
+          launchNonce: 'replacement'
+        })
+      )
+
+      await server.shutdown()
+
+      expect(readFileSync(tokenPath, 'utf8')).toBe('replacement-token')
+      expect(JSON.parse(readFileSync(pidPath, 'utf8'))).toMatchObject({
+        pid: process.pid,
+        launchNonce: 'replacement'
+      })
+    })
+
     it('stops accepting connections after shutdown', async () => {
       await startServer()
       await server.shutdown()
@@ -800,9 +838,7 @@ describe('DaemonServer', () => {
       )
 
       const c = await connectClient()
-      // The daemon may self-terminate before the reply flushes; callers treat
-      // that as success, so only the observable teardown below is asserted.
-      await c.request('shutdown', { killSessions: true }).catch(() => {})
+      await expect(c.request('shutdown', { killSessions: true })).resolves.toEqual({})
 
       await waitFor(() => daemon.server === null)
       await waitFor(() => !existsSync(socketPath))

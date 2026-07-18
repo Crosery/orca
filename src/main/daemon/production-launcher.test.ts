@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { createProductionLauncher } from './production-launcher'
 import { startDaemon, type DaemonHandle } from './daemon-main'
 import { DaemonClient } from './client'
@@ -115,8 +115,9 @@ describe('createProductionLauncher', () => {
       getDaemonEntryPath: () => join(dir, 'daemon-entry.js')
     })
 
-    const launch = launcher(socketPathFor(dir), tokenPathFor(dir))
-    handlers.message[0]?.({ type: 'ready' })
+    const pidPath = join(dir, 'daemon.pid')
+    const launch = launcher(socketPathFor(dir), tokenPathFor(dir), pidPath, 'launch-a')
+    handlers.message[0]?.({ type: 'ready', startedAtMs: 123_456 })
     const handle = await launch
 
     expect(handle.shutdown).toEqual(expect.any(Function))
@@ -125,6 +126,17 @@ describe('createProductionLauncher', () => {
     expect(handlers.exit).toHaveLength(0)
     expect(child.disconnect).toHaveBeenCalled()
     expect(child.unref).toHaveBeenCalled()
+    expect(JSON.parse(readFileSync(pidPath, 'utf8'))).toEqual({
+      pid: 12345,
+      startedAtMs: 123_456,
+      entryPath: join(dir, 'daemon-entry.js'),
+      launchNonce: 'launch-a'
+    })
+    expect(forkMock).toHaveBeenCalledWith(
+      join(dir, 'daemon-entry.js'),
+      expect.arrayContaining(['--pid-record', pidPath, '--launch-nonce', 'launch-a']),
+      expect.any(Object)
+    )
   })
 
   it('removes shutdown exit listener when force-kill timeout settles first', async () => {
@@ -161,7 +173,7 @@ describe('createProductionLauncher', () => {
       })
 
       const launch = launcher(socketPathFor(dir), tokenPathFor(dir))
-      handlers.message[0]?.({ type: 'ready' })
+      handlers.message[0]?.({ type: 'ready', startedAtMs: 123_456 })
       const handle = await launch
 
       const shutdown = handle.shutdown()

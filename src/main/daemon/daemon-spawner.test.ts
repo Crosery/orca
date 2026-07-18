@@ -6,7 +6,8 @@ import {
   DaemonSpawner,
   getDaemonPidPath,
   getDaemonSocketPath,
-  getDaemonTokenPath
+  getDaemonTokenPath,
+  restoreClaimedDaemonArtifact
 } from './daemon-spawner'
 import { startDaemon, type DaemonHandle } from './daemon-main'
 import { DaemonClient } from './client'
@@ -70,6 +71,20 @@ describe('DaemonSpawner', () => {
   }
 
   describe('ensureRunning', () => {
+    it('passes the scoped PID path and a fresh launch nonce to the launcher', async () => {
+      const launcher = vi.fn(async () => ({ shutdown: vi.fn(async () => {}) }))
+      spawner = new DaemonSpawner({ runtimeDir: dir, launcher })
+
+      await spawner.ensureRunning()
+
+      expect(launcher).toHaveBeenCalledWith(
+        getDaemonSocketPath(dir),
+        getDaemonTokenPath(dir),
+        getDaemonPidPath(dir),
+        expect.stringMatching(/^[0-9a-f-]{36}$/)
+      )
+    })
+
     it('uses protocol-scoped socket and token paths', () => {
       const socketPath = getDaemonSocketPath(dir)
       const tokenPath = getDaemonTokenPath(dir)
@@ -170,5 +185,35 @@ describe('DaemonSpawner', () => {
       expect(client.isConnected()).toBe(true)
       client.disconnect()
     })
+  })
+})
+
+describe('restoreClaimedDaemonArtifact', () => {
+  it('retains the unique claim when restoration fails without a replacement', () => {
+    expect(
+      restoreClaimedDaemonArtifact('/claimed', '/canonical', {
+        copyExclusive: () => {
+          throw new Error('injected ENOSPC')
+        },
+        canonicalExists: () => false
+      })
+    ).toBe(false)
+  })
+
+  it('allows claim cleanup after successful restore or a confirmed replacement', () => {
+    expect(
+      restoreClaimedDaemonArtifact('/claimed', '/canonical', {
+        copyExclusive: () => {},
+        canonicalExists: () => false
+      })
+    ).toBe(true)
+    expect(
+      restoreClaimedDaemonArtifact('/claimed', '/canonical', {
+        copyExclusive: () => {
+          throw new Error('injected EEXIST')
+        },
+        canonicalExists: () => true
+      })
+    ).toBe(true)
   })
 })

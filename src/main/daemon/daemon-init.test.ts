@@ -43,6 +43,7 @@ const {
   ensureRunningOverrides,
   adapterInstances,
   defaultListSessionsSessions,
+  listProcessesControl,
   getLocalPtyProviderMock,
   localFallbackProvider,
   setLocalPtyProviderMock,
@@ -121,6 +122,9 @@ const {
   // Why: adapters are constructed inside initDaemonPtyProvider, so tests that
   // need listSessions to report live sessions set this before calling init.
   const defaultListSessionsSessions: { sessionId: string }[] = []
+  const listProcessesControl: {
+    current: null | (() => Promise<{ sessionId: string }[]>)
+  } = { current: null }
 
   const localFallbackProvider = {
     routesFreshSpawnsToLocalProvider: undefined,
@@ -176,6 +180,7 @@ const {
     ensureRunningOverrides,
     adapterInstances,
     defaultListSessionsSessions,
+    listProcessesControl,
     getLocalPtyProviderMock,
     localFallbackProvider,
     setLocalPtyProviderMock,
@@ -205,6 +210,7 @@ type MockAdapter = {
   fanoutSyntheticExits: ReturnType<typeof vi.fn>
   listProcesses: ReturnType<typeof vi.fn>
   listSessions: ReturnType<typeof vi.fn>
+  establishLifecycleLease: ReturnType<typeof vi.fn>
   shutdown: ReturnType<typeof vi.fn>
   dispose: ReturnType<typeof vi.fn>
   disconnectOnly: ReturnType<typeof vi.fn>
@@ -312,6 +318,7 @@ vi.mock('./daemon-pty-adapter', () => ({
     readonly fanoutSyntheticExits: ReturnType<typeof vi.fn>
     readonly listProcesses: ReturnType<typeof vi.fn>
     readonly listSessions: ReturnType<typeof vi.fn>
+    readonly establishLifecycleLease: ReturnType<typeof vi.fn>
     readonly shutdown: ReturnType<typeof vi.fn>
     readonly dispose: ReturnType<typeof vi.fn>
     readonly disconnectOnly: ReturnType<typeof vi.fn>
@@ -326,8 +333,11 @@ vi.mock('./daemon-pty-adapter', () => ({
       this.fanoutSyntheticExits = vi.fn(() => {
         this.callOrder.push('fanoutSyntheticExits')
       })
-      this.listProcesses = vi.fn(async () => [])
+      this.listProcesses = vi.fn(async () =>
+        listProcessesControl.current ? listProcessesControl.current() : []
+      )
       this.listSessions = vi.fn(async () => [...defaultListSessionsSessions])
+      this.establishLifecycleLease = vi.fn(async () => {})
       this.shutdown = vi.fn(async () => {})
       this.dispose = vi.fn()
       this.disconnectOnly = vi.fn(async () => {})
@@ -351,6 +361,7 @@ async function importFresh() {
   ensureRunningOverrides.length = 0
   adapterInstances.length = 0
   defaultListSessionsSessions.length = 0
+  listProcessesControl.current = null
   getLocalPtyProviderMock.mockClear()
   localFallbackProvider.spawn.mockClear()
   localFallbackProvider.write.mockClear()
@@ -429,6 +440,10 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
     expect(rebindLocalProviderListenersMock.mock.invocationCallOrder[0]).toBeGreaterThan(
       setLocalPtyProviderMock.mock.invocationCallOrder[0]
     )
+    expect(adapterInstances[0].establishLifecycleLease).toHaveBeenCalledOnce()
+    expect(adapterInstances[0].establishLifecycleLease.mock.invocationCallOrder[0]).toBeLessThan(
+      setLocalPtyProviderMock.mock.invocationCallOrder[0]
+    )
   })
 
   it('prunes seeded Claude live-PTY ids against daemon sessions after init', async () => {
@@ -474,9 +489,56 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
     resolveEnsureRunning({ socketPath: '/fake/socket-late', tokenPath: '/fake/token-late' })
     await started
 
-    expect(adapterInstances).toHaveLength(0)
+    expect(adapterInstances).toHaveLength(1)
+    expect(adapterInstances[0].disconnectOnly).toHaveBeenCalledOnce()
+    expect(adapterInstances[0].establishLifecycleLease).not.toHaveBeenCalled()
     expect(setLocalPtyProviderMock).not.toHaveBeenCalled()
     expect(rebindLocalProviderListenersMock).not.toHaveBeenCalled()
+    expect(mod.getDaemonProvider()).toBeNull()
+  })
+
+  it('disconnects uninstalled adapter leases when startup aborts during legacy discovery', async () => {
+    const mod = await importFresh()
+    probeSocketExistsMock.mockImplementation((p?: string) => p?.endsWith('daemon-v9.sock') ?? false)
+    netConnectMock.mockImplementation(() => {
+      const handlers: Record<string, (() => void)[]> = { connect: [], error: [] }
+      return {
+        on(event: string, cb: () => void) {
+          handlers[event]?.push(cb)
+          if (event === 'connect') {
+            queueMicrotask(() => cb())
+          }
+          return this
+        },
+        removeListener(event: string, cb: () => void) {
+          handlers[event] = handlers[event]?.filter((handler) => handler !== cb) ?? []
+          return this
+        },
+        destroy() {}
+      }
+    })
+    let resolveDiscovery!: (sessions: { sessionId: string }[]) => void
+    const discovery = new Promise<{ sessionId: string }[]>((resolve) => {
+      resolveDiscovery = resolve
+    })
+    listProcessesControl.current = () => discovery
+    const abortController = new AbortController()
+
+    const started = mod.initDaemonPtyProvider(abortController.signal)
+    await vi.waitFor(() => {
+      expect(adapterInstances.some((instance) => instance.protocolVersion === 9)).toBe(true)
+      expect(
+        adapterInstances.some((instance) => instance.listProcesses.mock.calls.length > 0)
+      ).toBe(true)
+    })
+    abortController.abort()
+    resolveDiscovery([])
+    await started
+
+    expect(adapterInstances).toHaveLength(2)
+    expect(adapterInstances[0].disconnectOnly).toHaveBeenCalledOnce()
+    expect(adapterInstances[1].disconnectOnly).toHaveBeenCalledOnce()
+    expect(setLocalPtyProviderMock).not.toHaveBeenCalled()
     expect(mod.getDaemonProvider()).toBeNull()
   })
 
@@ -801,6 +863,10 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
     // result, so its existence proves the ordering.
     expect(adapterInstances).toHaveLength(2)
     expect(adapterInstances[1].options.socketPath).toBe('/fake/socket-2')
+    expect(adapterInstances[1].establishLifecycleLease).toHaveBeenCalledOnce()
+    expect(adapterInstances[1].establishLifecycleLease.mock.invocationCallOrder[0]).toBeLessThan(
+      setLocalPtyProviderMock.mock.invocationCallOrder.at(-1) as number
+    )
   })
 
   it('exercises the alive-daemon cleanup path: issues shutdown RPC via DaemonClient before spawning a replacement', async () => {
@@ -996,7 +1062,7 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
         on(event: string, cb: (arg?: unknown) => void) {
           handlers[event]?.push(cb)
           if (event === 'message') {
-            queueMicrotask(() => cb({ type: 'ready' }))
+            queueMicrotask(() => cb({ type: 'ready', startedAtMs: 1_000_000 }))
           }
           return this
         },
@@ -1133,7 +1199,7 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
         on(event: string, cb: (arg?: unknown) => void) {
           handlers[event]?.push(cb)
           if (event === 'message') {
-            queueMicrotask(() => cb({ type: 'ready' }))
+            queueMicrotask(() => cb({ type: 'ready', startedAtMs: 1_000_000 }))
           }
           return this
         },
@@ -1264,7 +1330,7 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
         on(event: string, cb: (arg?: unknown) => void) {
           handlers[event]?.push(cb)
           if (event === 'message') {
-            queueMicrotask(() => cb({ type: 'ready' }))
+            queueMicrotask(() => cb({ type: 'ready', startedAtMs: 1_000_000 }))
           }
           return this
         },
@@ -1316,7 +1382,7 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
       on(event: string, cb: (arg?: unknown) => void) {
         handlers[event]?.push(cb)
         if (event === 'message') {
-          queueMicrotask(() => cb({ type: 'ready' }))
+          queueMicrotask(() => cb({ type: 'ready', startedAtMs: 1_000_000 }))
         }
         return this
       },
@@ -1336,16 +1402,108 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
     expect(handlers.exit).toHaveLength(0)
     expect(child.disconnect).toHaveBeenCalledOnce()
     expect(child.unref).toHaveBeenCalledOnce()
-    expect(writeFileSyncMock).toHaveBeenCalledWith(
-      `/fake/daemon/daemon-v${PROTOCOL_VERSION}.pid`,
-      JSON.stringify({
-        pid: 12345,
-        startedAtMs: 1_000_000,
-        entryPath: FAKE_DAEMON_ENTRY_PATH,
-        appVersion: '1.2.3'
-      }),
-      { mode: 0o600 }
+    const [pidPath, pidContents, pidOptions] = writeFileSyncMock.mock.calls.at(-1) ?? []
+    expect(pidPath).toBe(`/fake/daemon/daemon-v${PROTOCOL_VERSION}.pid`)
+    expect(JSON.parse(pidContents as string)).toEqual({
+      pid: 12345,
+      startedAtMs: 1_000_000,
+      entryPath: FAKE_DAEMON_ENTRY_PATH,
+      appVersion: '1.2.3',
+      launchNonce: expect.stringMatching(/^[0-9a-f-]{36}$/)
+    })
+    expect(pidOptions).toEqual({ mode: 0o600, flag: 'wx' })
+    const launchArgs = forkMock.mock.calls.at(-1)?.[1] as string[]
+    const launchNonceIndex = launchArgs.indexOf('--launch-nonce')
+    expect(launchArgs).toEqual(
+      expect.arrayContaining([
+        '--pid-record',
+        `/fake/daemon/daemon-v${PROTOCOL_VERSION}.pid`,
+        '--launch-nonce'
+      ])
     )
+    expect(launchArgs[launchNonceIndex + 1]).toBe(JSON.parse(pidContents as string).launchNonce)
+  })
+
+  it('kills and rejects a daemon whose readiness message omits its start time', async () => {
+    const mod = await importFresh()
+    checkDaemonHealthMock.mockResolvedValue('unreachable')
+    await mod.initDaemonPtyProvider()
+
+    const launcher = spawnerInstances[0].launcher as (
+      socketPath: string,
+      tokenPath: string
+    ) => Promise<{ shutdown(): Promise<void> }>
+    const kill = vi.spyOn(process, 'kill').mockReturnValue(true)
+    const child = {
+      pid: 12345,
+      on(event: string, cb: (arg?: unknown) => void) {
+        if (event === 'message') {
+          queueMicrotask(() => cb({ type: 'ready' }))
+        }
+        return this
+      },
+      off: vi.fn(),
+      disconnect: vi.fn(),
+      unref: vi.fn()
+    }
+    forkMock.mockReturnValueOnce(child)
+
+    try {
+      await expect(launcher('/fake/socket', '/fake/token')).rejects.toThrow(
+        'Daemon readiness identity is incomplete'
+      )
+      expect(kill).toHaveBeenCalledWith(12345, 'SIGTERM')
+      expect(writeFileSyncMock).not.toHaveBeenCalled()
+      expect(child.disconnect).not.toHaveBeenCalled()
+      expect(child.unref).not.toHaveBeenCalled()
+    } finally {
+      kill.mockRestore()
+    }
+  })
+
+  it('kills and rejects a daemon when exclusive PID publication fails', async () => {
+    const mod = await importFresh()
+    checkDaemonHealthMock.mockResolvedValue('unreachable')
+    await mod.initDaemonPtyProvider()
+
+    const launcher = spawnerInstances[0].launcher as (
+      socketPath: string,
+      tokenPath: string
+    ) => Promise<{ shutdown(): Promise<void> }>
+    const kill = vi.spyOn(process, 'kill').mockReturnValue(true)
+    const child = {
+      pid: 12345,
+      on(event: string, cb: (arg?: unknown) => void) {
+        if (event === 'message') {
+          queueMicrotask(() => cb({ type: 'ready', startedAtMs: 1_000_000 }))
+        }
+        return this
+      },
+      off: vi.fn(),
+      disconnect: vi.fn(),
+      unref: vi.fn()
+    }
+    const publicationError = Object.assign(new Error('PID record already exists'), {
+      code: 'EEXIST'
+    })
+    writeFileSyncMock.mockImplementationOnce(() => {
+      throw publicationError
+    })
+    forkMock.mockReturnValueOnce(child)
+
+    try {
+      await expect(launcher('/fake/socket', '/fake/token')).rejects.toBe(publicationError)
+      expect(writeFileSyncMock).toHaveBeenCalledWith(
+        `/fake/daemon/daemon-v${PROTOCOL_VERSION}.pid`,
+        expect.any(String),
+        { mode: 0o600, flag: 'wx' }
+      )
+      expect(kill).toHaveBeenCalledWith(12345, 'SIGTERM')
+      expect(child.disconnect).not.toHaveBeenCalled()
+      expect(child.unref).not.toHaveBeenCalled()
+    } finally {
+      kill.mockRestore()
+    }
   })
 
   it('removes detached daemon startup listeners after startup error', async () => {
@@ -1492,7 +1650,7 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
       on(event: string, cb: (arg?: unknown) => void) {
         handlers[event]?.push(cb)
         if (event === 'message') {
-          queueMicrotask(() => cb({ type: 'ready' }))
+          queueMicrotask(() => cb({ type: 'ready', startedAtMs: 1_000_000 }))
         }
         return this
       },
@@ -1602,7 +1760,7 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
       pid: 12345,
       on(event: string, cb: (arg?: unknown) => void) {
         if (event === 'message') {
-          queueMicrotask(() => cb({ type: 'ready' }))
+          queueMicrotask(() => cb({ type: 'ready', startedAtMs: 1_000_000 }))
         }
         return this
       },
@@ -1722,7 +1880,7 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
       pid: 12345,
       on(event: string, cb: (arg?: unknown) => void) {
         if (event === 'message') {
-          queueMicrotask(() => cb({ type: 'ready' }))
+          queueMicrotask(() => cb({ type: 'ready', startedAtMs: 1_000_000 }))
         }
         return this
       },
@@ -1842,7 +2000,7 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
       pid: 12345,
       on(event: string, cb: (arg?: unknown) => void) {
         if (event === 'message') {
-          queueMicrotask(() => cb({ type: 'ready' }))
+          queueMicrotask(() => cb({ type: 'ready', startedAtMs: 1_000_000 }))
         }
         return this
       },
@@ -1917,16 +2075,16 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
 
     await launcher('/fake/socket', '/fake/token')
 
-    expect(writeFileSyncMock).toHaveBeenCalledWith(
-      `/fake/daemon/daemon-v${PROTOCOL_VERSION}.pid`,
-      JSON.stringify({
-        pid: 12345,
-        startedAtMs: 1_700_000_123_456,
-        entryPath: FAKE_DAEMON_ENTRY_PATH,
-        appVersion: '1.2.3'
-      }),
-      { mode: 0o600 }
-    )
+    const [pidPath, pidContents, pidOptions] = writeFileSyncMock.mock.calls.at(-1) ?? []
+    expect(pidPath).toBe(`/fake/daemon/daemon-v${PROTOCOL_VERSION}.pid`)
+    expect(JSON.parse(pidContents as string)).toEqual({
+      pid: 12345,
+      startedAtMs: 1_700_000_123_456,
+      entryPath: FAKE_DAEMON_ENTRY_PATH,
+      appVersion: '1.2.3',
+      launchNonce: expect.stringMatching(/^[0-9a-f-]{36}$/)
+    })
+    expect(pidOptions).toEqual({ mode: 0o600, flag: 'wx' })
   })
 
   it('keeps legacy daemon pid/token files when the probe fails but the pid-file process is alive', async () => {
@@ -1987,7 +2145,7 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
         on(event: string, cb: (arg?: unknown) => void) {
           handlers[event]?.push(cb)
           if (event === 'message') {
-            queueMicrotask(() => cb({ type: 'ready' }))
+            queueMicrotask(() => cb({ type: 'ready', startedAtMs: 1_000_000 }))
           }
           return this
         },
@@ -2073,7 +2231,7 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
         on(event: string, cb: (arg?: unknown) => void) {
           handlers[event]?.push(cb)
           if (event === 'message') {
-            queueMicrotask(() => cb({ type: 'ready' }))
+            queueMicrotask(() => cb({ type: 'ready', startedAtMs: 1_000_000 }))
           }
           return this
         },

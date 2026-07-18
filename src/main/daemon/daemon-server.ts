@@ -4,7 +4,7 @@
 import { createServer, type Server, type Socket } from 'node:net'
 import { randomUUID } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
-import { writeFileSync, chmodSync, unlinkSync } from 'node:fs'
+import { writeFileSync, chmodSync } from 'node:fs'
 import { StringDecoder } from 'node:string_decoder'
 import { encodeNdjson, createNdjsonParser } from './ndjson'
 import { TerminalHost } from './terminal-host'
@@ -23,7 +23,9 @@ import type { SubprocessHandle } from './session'
 import { checkPtySpawnHealth } from './pty-subprocess'
 import { createNoopDaemonFileLog, type DaemonFileLog } from './daemon-file-log'
 import { isTuiAgent } from '../../shared/tui-agent-config'
+import { unlinkOwnedDaemonPidFile, unlinkOwnedDaemonTokenFile } from './daemon-spawner'
 import {
+  CLEAN_DISCONNECT_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
   NOTIFY_PREFIX,
   SessionNotFoundError,
@@ -35,6 +37,21 @@ import {
 export type DaemonServerOptions = {
   socketPath: string
   tokenPath: string
+  pidPath?: string
+  launchNonce?: string
+  startedAtMs?: number
+  /** Direct-construction seam for protocol fixture tests; production never overrides it. */
+  protocolVersion?: number
+  onIdleShutdown?: () => void
+  /** Direct-construction-only controls; production uses the compiled disconnect grace. */
+  idleShutdownTestConfig?: {
+    durationMs: number
+    clock: {
+      setTimeout(callback: () => void, delayMs: number): unknown
+      clearTimeout(handle: unknown): void
+      now(): number
+    }
+  }
   ptySpawnHealthCheck?: () => Promise<void>
   preparePtySpawn?: () => Promise<void>
   log?: DaemonFileLog
@@ -53,6 +70,7 @@ type ConnectedClient = {
   clientId: string
   controlSocket: Socket
   streamSocket: Socket | null
+  authenticatedPairEstablished: boolean
 }
 
 type PendingPtySpawnPreparation = {
@@ -60,14 +78,31 @@ type PendingPtySpawnPreparation = {
 }
 
 export class DaemonServer {
+  // Why: a crash has no authenticated detach signal. Two minutes absorbs
+  // update/restart connection gaps while still retiring an empty orphan quickly.
+  private static readonly DISCONNECTED_IDLE_GRACE_MS = 2 * 60 * 1000
   private server: Server | null = null
   private token: string
   private host: TerminalHost
   private socketPath: string
   private tokenPath: string
+  private pidPath: string | null
+  private launchNonce: string | null
+  private startedAtMs: number | null
+  private protocolVersion: number
+  private onIdleShutdown: () => void
   private ptySpawnHealthCheck: () => Promise<void>
   private preparePtySpawn: () => Promise<void>
   private log: DaemonFileLog
+  private transportSockets = new Set<Socket>()
+  private createOrAttachInFlight = 0
+  private idleShutdownState: 'running' | 'idle-shutdown-pending' | 'shutting-down' = 'running'
+  private idleShutdownTimer: unknown | null = null
+  private unexpectedDisconnectDeadlineMs: number | null = null
+  private shutdownPromise: Promise<void> | null = null
+  private ordinaryShutdownServerClose: Promise<void> | null = null
+  private idleShutdownDurationMs: number
+  private idleShutdownClock: NonNullable<DaemonServerOptions['idleShutdownTestConfig']>['clock']
 
   private clients = new Map<string, ConnectedClient>()
   private streamDataBatcher = new DaemonStreamDataBatcher(
@@ -116,6 +151,28 @@ export class DaemonServer {
   constructor(opts: DaemonServerOptions) {
     this.socketPath = opts.socketPath
     this.tokenPath = opts.tokenPath
+    this.pidPath = opts.pidPath ?? null
+    this.protocolVersion = opts.protocolVersion ?? PROTOCOL_VERSION
+    this.launchNonce =
+      opts.launchNonce ??
+      (this.protocolVersion >= CLEAN_DISCONNECT_PROTOCOL_VERSION ? randomUUID() : null)
+    this.startedAtMs =
+      opts.startedAtMs ??
+      (this.protocolVersion >= CLEAN_DISCONNECT_PROTOCOL_VERSION
+        ? Date.now() - process.uptime() * 1000
+        : null)
+    this.onIdleShutdown = opts.onIdleShutdown ?? (() => {})
+    this.idleShutdownDurationMs =
+      opts.idleShutdownTestConfig?.durationMs ?? DaemonServer.DISCONNECTED_IDLE_GRACE_MS
+    this.idleShutdownClock = opts.idleShutdownTestConfig?.clock ?? {
+      setTimeout: (callback, delayMs) => {
+        const timer = setTimeout(callback, delayMs)
+        timer.unref()
+        return timer
+      },
+      clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+      now: () => Date.now()
+    }
     this.token = randomUUID()
     this.host = new TerminalHost({ spawnSubprocess: opts.spawnSubprocess })
     this.ptySpawnHealthCheck = opts.ptySpawnHealthCheck ?? checkPtySpawnHealth
@@ -156,6 +213,37 @@ export class DaemonServer {
   }
 
   async shutdown(): Promise<void> {
+    if (this.shutdownPromise) {
+      return this.shutdownPromise
+    }
+    const serverClose = this.beginOrdinaryShutdownFence()
+    this.shutdownPromise = this.finishOrdinaryShutdown(serverClose)
+    return this.shutdownPromise
+  }
+
+  private beginOrdinaryShutdownFence(): Promise<void> {
+    this.idleShutdownState = 'shutting-down'
+    this.cancelIdleShutdownTimer()
+    this.ordinaryShutdownServerClose ??= this.beginServerClose()
+    return this.ordinaryShutdownServerClose
+  }
+
+  private async finishOrdinaryShutdown(serverClose: Promise<void>): Promise<void> {
+    this.unlinkOwnedEndpointArtifacts()
+    await this.disposeDaemonResources()
+    await serverClose
+  }
+
+  private unlinkOwnedEndpointArtifacts(): void {
+    // Why: close has already fenced this endpoint, but ownership checks still
+    // prevent a late replacement's canonical token or PID record from removal.
+    unlinkOwnedDaemonTokenFile(this.tokenPath, this.token)
+    if (this.pidPath && this.launchNonce) {
+      unlinkOwnedDaemonPidFile(this.pidPath, process.pid, this.launchNonce)
+    }
+  }
+
+  private async disposeDaemonResources(): Promise<void> {
     this.stopStreamBacklogProbe()
     this.transientFactRelay.dispose()
     this.cancelAllPendingPtySpawnPreparations()
@@ -175,23 +263,122 @@ export class DaemonServer {
       client.streamSocket?.destroy()
     }
     this.clients.clear()
+    for (const socket of this.transportSockets) {
+      socket.destroy()
+    }
+    this.transportSockets.clear()
+  }
 
+  private beginServerClose(): Promise<void> {
+    const server = this.server
+    this.server = null
+    if (!server) {
+      return Promise.resolve()
+    }
     return new Promise<void>((resolve) => {
-      if (this.server) {
-        this.server.close(() => {
-          try {
-            unlinkSync(this.socketPath)
-          } catch {}
-          resolve()
-        })
-        this.server = null
-      } else {
+      // Why: call close synchronously before any awaited cleanup so no new
+      // transport can enter after the idle fence is proven empty.
+      server.close(() => {
+        // Node owns unlinking its Unix listener. An extra check-then-unlink here could
+        // delete a replacement endpoint installed concurrently after close.
         resolve()
-      }
+      })
     })
   }
 
+  private isIdle(): boolean {
+    return (
+      this.transportSockets.size === 0 &&
+      this.clients.size === 0 &&
+      this.createOrAttachInFlight === 0 &&
+      this.host.listSessions().length === 0
+    )
+  }
+
+  private reevaluateIdleShutdown(): void {
+    if (this.idleShutdownState !== 'running') {
+      return
+    }
+    if (!this.isIdle() || this.unexpectedDisconnectDeadlineMs === null) {
+      this.cancelIdleShutdownTimer()
+      return
+    }
+    if (this.idleShutdownTimer !== null) {
+      return
+    }
+    const remainingMs = Math.max(
+      0,
+      this.unexpectedDisconnectDeadlineMs - this.idleShutdownClock.now()
+    )
+    if (remainingMs === 0) {
+      this.beginIdleShutdown()
+      return
+    }
+    this.idleShutdownTimer = this.idleShutdownClock.setTimeout(() => {
+      this.idleShutdownTimer = null
+      this.beginIdleShutdown()
+    }, remainingMs)
+  }
+
+  private cancelIdleShutdownTimer(): void {
+    if (this.idleShutdownTimer === null) {
+      return
+    }
+    this.idleShutdownClock.clearTimeout(this.idleShutdownTimer)
+    this.idleShutdownTimer = null
+  }
+
+  private beginIdleShutdown(): void {
+    this.idleShutdownTimer = null
+    if (this.idleShutdownState !== 'running') {
+      return
+    }
+    this.idleShutdownState = 'idle-shutdown-pending'
+    if (!this.isIdle()) {
+      // Why: work admitted before the fence wins. Clearing the pending state
+      // keeps that already-started client/session fully usable.
+      this.idleShutdownState = 'running'
+      this.reevaluateIdleShutdown()
+      return
+    }
+
+    this.idleShutdownState = 'shutting-down'
+    // beginServerClose() runs synchronously up to server.close(), before host
+    // disposal or file cleanup can yield to a racing connection.
+    const serverClose = this.beginServerClose()
+    this.shutdownPromise = this.finishIdleShutdown(serverClose)
+  }
+
+  private async finishIdleShutdown(serverClose: Promise<void>): Promise<void> {
+    this.unlinkOwnedEndpointArtifacts()
+    await this.disposeDaemonResources()
+    await serverClose
+    this.onIdleShutdown()
+  }
+
   private handleConnection(socket: Socket): void {
+    this.cancelIdleShutdownTimer()
+    this.transportSockets.add(socket)
+    const removeTransport = (): void => {
+      this.transportSockets.delete(socket)
+      this.reevaluateIdleShutdown()
+    }
+    socket.once('close', removeTransport)
+    socket.on('error', () => socket.destroy())
+
+    if (this.idleShutdownState !== 'running') {
+      // Why: an accepted connection queued just before server.close() must get
+      // an explicit retry signal instead of appearing authenticated then dying.
+      socket.end(
+        encodeNdjson({
+          type: 'hello',
+          ok: false,
+          error: 'Daemon temporarily unavailable; reconnect',
+          retryable: true
+        })
+      )
+      return
+    }
     // Why: clients can send multibyte prompt/input text split across socket
     // chunks; keep UTF-8 sequences intact before NDJSON parsing.
     const decoder = new StringDecoder('utf8')
@@ -203,7 +390,6 @@ export class DaemonServer {
     )
 
     socket.on('data', (chunk) => parser.feed(decoder.write(chunk)))
-    socket.on('error', () => socket.destroy())
   }
 
   private handleFirstMessage(
@@ -219,7 +405,7 @@ export class DaemonServer {
       return
     }
 
-    if (hello.version !== PROTOCOL_VERSION) {
+    if (hello.version !== this.protocolVersion) {
       this.log.log('client-hello-rejected', {
         reason: 'protocol-mismatch',
         clientVersion: hello.version
@@ -237,18 +423,34 @@ export class DaemonServer {
     }
 
     this.log.log('client-hello-accepted', { role: hello.role, clientId: hello.clientId })
-    socket.write(encodeNdjson({ type: 'hello', ok: true }))
+    socket.write(
+      encodeNdjson({
+        type: 'hello',
+        ok: true,
+        ...(this.launchNonce && this.startedAtMs
+          ? {
+              daemonIdentity: {
+                pid: process.pid,
+                startedAtMs: this.startedAtMs,
+                launchNonce: this.launchNonce
+              }
+            }
+          : {})
+      })
+    )
 
     if (hello.role === 'control') {
       const previous = this.clients.get(hello.clientId)
       const client: ConnectedClient = {
         clientId: hello.clientId,
         controlSocket: socket,
-        streamSocket: null
+        streamSocket: null,
+        authenticatedPairEstablished: false
       }
       this.clients.set(hello.clientId, client)
       this.setupControlSocket(socket, hello.clientId)
       if (previous) {
+        this.recordFullyAuthenticatedDisconnect(previous.authenticatedPairEstablished)
         // Why: a reconnect can reuse a clientId before the old sockets notice
         // their close. Tear them down after installing the new owner so stale
         // close events cannot delete the replacement client entry.
@@ -264,6 +466,11 @@ export class DaemonServer {
         return
       }
       this.setupStreamSocket(socket, client)
+      client.authenticatedPairEstablished = true
+      // A complete app connection, unlike a health or raw socket probe, owns
+      // the endpoint again and cancels the prior disconnect deadline.
+      this.unexpectedDisconnectDeadlineMs = null
+      this.cancelIdleShutdownTimer()
     }
   }
 
@@ -285,10 +492,26 @@ export class DaemonServer {
       if (client?.controlSocket !== socket) {
         return
       }
+      const wasFullyAuthenticated = client.authenticatedPairEstablished
       this.streamDataBatcher.clear(clientId)
       client.streamSocket?.destroy()
       this.clients.delete(clientId)
+      this.recordFullyAuthenticatedDisconnect(wasFullyAuthenticated)
+      this.reevaluateIdleShutdown()
     })
+  }
+
+  private recordFullyAuthenticatedDisconnect(wasFullyAuthenticated: boolean): void {
+    if (
+      !wasFullyAuthenticated ||
+      [...this.clients.values()].some((remaining) => remaining.authenticatedPairEstablished) ||
+      this.idleShutdownState !== 'running'
+    ) {
+      return
+    }
+    // Why: incomplete authenticated transports pause the deadline but must
+    // not erase evidence that the last fully connected app disappeared.
+    this.unexpectedDisconnectDeadlineMs = this.idleShutdownClock.now() + this.idleShutdownDurationMs
   }
 
   private setupStreamSocket(socket: Socket, client: ConnectedClient): void {
@@ -387,64 +610,77 @@ export class DaemonServer {
 
     switch (request.type) {
       case 'createOrAttach': {
+        this.cancelIdleShutdownTimer()
+        if (this.idleShutdownState !== 'running') {
+          throw new Error('Daemon temporarily unavailable; reconnect')
+        }
+        this.unexpectedDisconnectDeadlineMs = null
+        this.createOrAttachInFlight++
         const p = request.payload
-        await this.preparePtySpawnUnlessCanceled(p.sessionId)
-        const result = await this.host.createOrAttach({
-          sessionId: p.sessionId,
-          cols: p.cols,
-          rows: p.rows,
-          cwd: p.cwd,
-          env: p.env,
-          envToDelete: p.envToDelete,
-          command: p.command,
-          startupCommandDelivery: p.startupCommandDelivery,
-          // Why: daemon RPC payloads are untrusted JSON. Persist only the
-          // allowlisted enum used for byte routing, never arbitrary identity.
-          ...(isTuiAgent(p.launchAgent) ? { launchAgent: p.launchAgent } : {}),
-          shellOverride: p.shellOverride,
-          terminalWindowsWslDistro: p.terminalWindowsWslDistro,
-          terminalWindowsPowerShellImplementation: p.terminalWindowsPowerShellImplementation,
-          shellReadySupported: p.shellReadySupported,
-          historySeed: p.historySeed,
-          ...(p.shellReadyTimeoutMs !== undefined
-            ? { shellReadyTimeoutMs: p.shellReadyTimeoutMs }
-            : {}),
-          streamClient: {
-            onData: (data) => {
-              // Scan BEFORE enqueue: the batcher may keep-tail drop this
-              // chunk, but its facts must be captured regardless.
-              this.transientFactRelay.onSessionData(p.sessionId, data)
-              const lastInputAt = this.lastInputAtBySessionId.get(p.sessionId)
-              const isInteractiveOutput =
-                data.length <= DaemonServer.INTERACTIVE_OUTPUT_MAX_CHARS &&
-                lastInputAt !== undefined &&
-                performance.now() - lastInputAt <= DaemonServer.INTERACTIVE_OUTPUT_WINDOW_MS
-              this.streamDataBatcher.enqueue(clientId, p.sessionId, data, {
-                flushImmediately: isInteractiveOutput,
-                flushMaxChars: DaemonServer.INTERACTIVE_OUTPUT_MAX_CHARS
-              })
-            },
-            onExit: (code) => {
-              // Why: exit tears down renderer handlers, so it must ride the
-              // ordered queue behind final output even when the shallow socket
-              // gate holds that output for a later drain pass.
-              this.log.log('session-exited', { sessionId: p.sessionId, code })
-              this.streamDataBatcher.enqueueControlEvent(clientId, p.sessionId, {
-                type: 'event',
-                event: 'exit',
-                sessionId: p.sessionId,
-                payload: { code }
-              })
-              this.streamDataBatcher.flush(clientId)
-              recordDaemonStreamBacklogEvent('sessionExit', {
-                sessionIdSuffix: p.sessionId.slice(-10)
-              })
-              this.transientFactRelay.onSessionExit(p.sessionId)
-              this.streamClientIdBySessionId.delete(p.sessionId)
-              this.lastInputAtBySessionId.delete(p.sessionId)
+        let result: Awaited<ReturnType<TerminalHost['createOrAttach']>>
+        try {
+          await this.preparePtySpawnUnlessCanceled(p.sessionId)
+          result = await this.host.createOrAttach({
+            sessionId: p.sessionId,
+            cols: p.cols,
+            rows: p.rows,
+            cwd: p.cwd,
+            env: p.env,
+            envToDelete: p.envToDelete,
+            command: p.command,
+            startupCommandDelivery: p.startupCommandDelivery,
+            // Why: daemon RPC payloads are untrusted JSON. Persist only the
+            // allowlisted enum used for byte routing, never arbitrary identity.
+            ...(isTuiAgent(p.launchAgent) ? { launchAgent: p.launchAgent } : {}),
+            shellOverride: p.shellOverride,
+            terminalWindowsWslDistro: p.terminalWindowsWslDistro,
+            terminalWindowsPowerShellImplementation: p.terminalWindowsPowerShellImplementation,
+            shellReadySupported: p.shellReadySupported,
+            historySeed: p.historySeed,
+            ...(p.shellReadyTimeoutMs !== undefined
+              ? { shellReadyTimeoutMs: p.shellReadyTimeoutMs }
+              : {}),
+            streamClient: {
+              onData: (data) => {
+                // Scan BEFORE enqueue: the batcher may keep-tail drop this
+                // chunk, but its facts must be captured regardless.
+                this.transientFactRelay.onSessionData(p.sessionId, data)
+                const lastInputAt = this.lastInputAtBySessionId.get(p.sessionId)
+                const isInteractiveOutput =
+                  data.length <= DaemonServer.INTERACTIVE_OUTPUT_MAX_CHARS &&
+                  lastInputAt !== undefined &&
+                  performance.now() - lastInputAt <= DaemonServer.INTERACTIVE_OUTPUT_WINDOW_MS
+                this.streamDataBatcher.enqueue(clientId, p.sessionId, data, {
+                  flushImmediately: isInteractiveOutput,
+                  flushMaxChars: DaemonServer.INTERACTIVE_OUTPUT_MAX_CHARS
+                })
+              },
+              onExit: (code) => {
+                // Why: exit tears down renderer handlers, so it must ride the
+                // ordered queue behind final output even when the shallow socket
+                // gate holds that output for a later drain pass.
+                this.log.log('session-exited', { sessionId: p.sessionId, code })
+                this.streamDataBatcher.enqueueControlEvent(clientId, p.sessionId, {
+                  type: 'event',
+                  event: 'exit',
+                  sessionId: p.sessionId,
+                  payload: { code }
+                })
+                this.streamDataBatcher.flush(clientId)
+                recordDaemonStreamBacklogEvent('sessionExit', {
+                  sessionIdSuffix: p.sessionId.slice(-10)
+                })
+                this.transientFactRelay.onSessionExit(p.sessionId)
+                this.streamClientIdBySessionId.delete(p.sessionId)
+                this.lastInputAtBySessionId.delete(p.sessionId)
+                this.reevaluateIdleShutdown()
+              }
             }
-          }
-        })
+          })
+        } finally {
+          this.createOrAttachInFlight--
+          this.reevaluateIdleShutdown()
+        }
         this.streamClientIdBySessionId.set(p.sessionId, clientId)
         // Why an attach-time marker: the adapter resyncs the background set on
         // a fresh connection, which can precede this attach — main's scan
@@ -598,6 +834,36 @@ export class DaemonServer {
       case 'listSessions':
         return { sessions: this.host.listSessions() }
 
+      case 'shutdownIfIdle': {
+        const authenticatedClient = this.clients.get(clientId)
+        const retiring =
+          authenticatedClient !== undefined &&
+          authenticatedClient.streamSocket !== null &&
+          this.clients.size === 1 &&
+          this.createOrAttachInFlight === 0 &&
+          this.host.listSessions().length === 0 &&
+          [...this.transportSockets].every(
+            (transport) =>
+              transport === authenticatedClient.controlSocket ||
+              transport === authenticatedClient.streamSocket
+          )
+        if (!retiring) {
+          return { retiring: false }
+        }
+        this.idleShutdownState = 'shutting-down'
+        this.unexpectedDisconnectDeadlineMs = null
+        this.cancelIdleShutdownTimer()
+        // Why: close before acknowledging retirement so no new terminal can
+        // race between the empty proof and daemon disposal.
+        const serverClose = this.beginServerClose()
+        setImmediate(() => {
+          if (!this.shutdownPromise) {
+            this.shutdownPromise = this.finishIdleShutdown(serverClose)
+          }
+        })
+        return { retiring: true }
+      }
+
       case 'getSnapshot': {
         const snapshotStart = performance.now()
         const requestedScrollbackRows = request.payload.scrollbackRows
@@ -643,11 +909,12 @@ export class DaemonServer {
         await this.ptySpawnHealthCheck()
         return { healthy: true }
 
-      case 'shutdown':
+      case 'shutdown': {
         this.log.log('shutdown', {
           reason: 'rpc',
           killSessions: request.payload.killSessions === true
         })
+        const serverClose = this.beginOrdinaryShutdownFence()
         if (request.payload.killSessions) {
           try {
             await this.host.dispose()
@@ -660,8 +927,15 @@ export class DaemonServer {
             })
           }
         }
-        process.nextTick(() => this.shutdown())
+        // Why: the listener is already fenced and sessions are disposed, but the
+        // control socket must survive long enough to acknowledge that proof.
+        setImmediate(() => {
+          if (!this.shutdownPromise) {
+            this.shutdownPromise = this.finishOrdinaryShutdown(serverClose)
+          }
+        })
         return {}
+      }
     }
     throw new Error(`Unknown request type: ${(request as { type: string }).type}`)
   }

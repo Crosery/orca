@@ -16,10 +16,11 @@ import type { TuiAgent } from '../../shared/types'
 // when daemon-baked behavior cannot be delivered by on-disk wrapper refresh.
 // Why: bump when adding daemon wire behavior so same-version old daemons do
 // not silently accept the handshake and then reject new RPCs.
-export const PROTOCOL_VERSION = 23
+export const PROTOCOL_VERSION = 24
 export const GIT_CREDENTIAL_GUARD_HOST_PROTOCOL_VERSION = 22
+export const CLEAN_DISCONNECT_PROTOCOL_VERSION = 24
 export const PREVIOUS_DAEMON_PROTOCOL_VERSIONS = [
-  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22
+  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23
 ] as const
 
 // ─── Session State Machine ──────────────────────────────────────────
@@ -80,19 +81,7 @@ export type { TerminalCheckpointFile } from './daemon-checkpoint-file'
 // ─── NDJSON Protocol Messages ───────────────────────────────────────
 
 // Hello handshake (first message on each socket)
-export type HelloMessage = {
-  type: 'hello'
-  version: number
-  token: string
-  clientId: string
-  role: 'control' | 'stream'
-}
-
-export type HelloResponse = {
-  type: 'hello'
-  ok: boolean
-  error?: string
-}
+export type { DaemonEndpointIdentity, HelloMessage, HelloResponse } from './daemon-hello-protocol'
 
 // ─── RPC Requests (Client → Daemon, on control socket) ─────────────
 
@@ -209,6 +198,11 @@ export type SignalRequest = {
 export type ListSessionsRequest = {
   id: string
   type: 'listSessions'
+}
+
+export type ShutdownIfIdleRequest = {
+  id: string
+  type: 'shutdownIfIdle'
 }
 
 export type DetachRequest = {
@@ -330,6 +324,7 @@ export type DaemonRequest =
   | KillRequest
   | SignalRequest
   | ListSessionsRequest
+  | ShutdownIfIdleRequest
   | DetachRequest
   | GetCwdRequest
   | GetForegroundProcessRequest
@@ -373,6 +368,10 @@ export type GetSnapshotResult = {
 
 export type ListSessionsResult = {
   sessions: SessionInfo[]
+}
+
+export type ShutdownIfIdleResult = {
+  retiring: boolean
 }
 
 export type SystemResolverHealth = 'healthy' | 'unhealthy' | 'unknown'
