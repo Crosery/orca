@@ -120,7 +120,10 @@ import {
   patchWorkspaceSessionByHost,
   persistWorkspaceSessionByHostSync
 } from './lib/workspace-session-host-persistence'
-import { collectFolderWorkspaceKeysFromSession } from './lib/workspace-session-hydration-keys'
+import {
+  collectFolderWorkspaceKeysFromSession,
+  collectWorktreeRecoveryRepoIdsFromSession
+} from './lib/workspace-session-hydration-keys'
 import {
   getStartupErrorFallbackUI,
   hydratePersistedUIAfterStartupRead
@@ -167,7 +170,9 @@ import {
   type PhysicalModifierToken
 } from '../../shared/keybindings'
 import {
+  getRepoExecutionHostId,
   isRuntimeOwnedSshTargetId,
+  LOCAL_EXECUTION_HOST_ID,
   toRuntimeExecutionHostId,
   type ExecutionHostId
 } from '../../shared/execution-host'
@@ -437,6 +442,7 @@ function App(): React.JSX.Element {
       fetchFolderWorkspaces: s.fetchFolderWorkspaces,
       fetchFolderWorkspacesForAllHosts: s.fetchFolderWorkspacesForAllHosts,
       fetchAllWorktrees: s.fetchAllWorktrees,
+      fetchWorktrees: s.fetchWorktrees,
       fetchWorktreeLineage: s.fetchWorktreeLineage,
       fetchOrcaProfiles: s.fetchOrcaProfiles,
       fetchSettings: s.fetchSettings,
@@ -953,19 +959,33 @@ function App(): React.JSX.Element {
         await timeRendererStartupStep('fetch-folder-workspaces-local', () =>
           actions.fetchFolderWorkspacesForAllHosts({ remoteHosts: 'skip' })
         )
-        await timeRendererStartupStep('fetch-worktrees', () =>
-          actions.fetchAllWorktrees({ hydrationPurge: 'defer' })
-        )
-        // Why: runtime-owned worktree slices live in per-host partitions.
-        // Remote catalogs now load after first paint, so include saved runtime
-        // host ids from local settings to restore their persisted session slices
-        // without waiting on network reachability. Unreadable partitions skip.
+        // Why: read the session before enumerating Git worktrees. Only
+        // repositories with persisted terminal sessions need a worktree list
+        // before reconnect; scanning every configured repo blocks first paint.
+        // Runtime-owned worktree slices live in per-host partitions. Include
+        // saved runtime host ids so those slices can hydrate without waiting
+        // for remote catalog reachability.
         const sessionRead = await timeRendererStartupStep('session-get', () =>
           fetchWorkspaceSessionWithRuntimeHostOwners(
             window.api.session,
             useAppStore.getState().repos,
             startupRuntimeHostIds
           )
+        )
+        const recoveryRepoIds = collectWorktreeRecoveryRepoIdsFromSession(
+          sessionRead.session,
+          sessionRead.runtimeHostIdByWorkspaceSessionKey
+        )
+        const recoveryRepoIdSet = new Set(recoveryRepoIds)
+        const recoveryRepos = useAppStore
+          .getState()
+          .repos.filter(
+            (repo) =>
+              recoveryRepoIdSet.has(repo.id) &&
+              getRepoExecutionHostId(repo) === LOCAL_EXECUTION_HOST_ID
+          )
+        await timeRendererStartupStep('fetch-recovery-worktrees', () =>
+          Promise.all(recoveryRepos.map((repo) => actions.fetchWorktrees(repo.id)))
         )
         await keybindingsPromise
         if (!cancelled) {
@@ -1128,6 +1148,8 @@ function App(): React.JSX.Element {
               })
               if (!cancelled) {
                 await timeRendererStartupStep('remote-worktree-refresh', async () => {
+                  // The first full scan runs after session hydration and
+                  // terminal reconnect, outside the startup-critical path.
                   await actions.fetchAllWorktrees()
                   await actions.fetchWorktreeLineage()
                 })
