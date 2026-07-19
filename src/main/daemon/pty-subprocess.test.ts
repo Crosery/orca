@@ -67,6 +67,14 @@ vi.mock('../providers/agent-foreground-process', () => ({
   }
 }))
 
+// Console-membership reads run a real node-pty fork that never settles under
+// fake timers; default to "shell-only" so the degraded-scan guard falls through
+// to its existing retirement logic (the degraded-scan behavior itself is
+// covered in pty-subprocess-foreground-degraded-scan.test.ts).
+vi.mock('../providers/windows-conpty-process-membership', () => ({
+  readWindowsConptyProcessIds: () => Promise.resolve(null)
+}))
+
 import { createPtySubprocess, checkPtySpawnHealth } from './pty-subprocess'
 import { PREVIOUS_DAEMON_PROTOCOL_VERSIONS, PROTOCOL_VERSION } from './types'
 import { TERMINAL_GIT_CREDENTIAL_GUARD_POLICY_ENV } from '../../shared/terminal-git-credential-guard'
