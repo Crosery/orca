@@ -262,7 +262,8 @@ describe('resolveMobilePrPrefill', () => {
         nextAction: null,
         defaultBaseRef: 'develop',
         title: 'Add feature',
-        body: 'Body'
+        body: 'Body',
+        reviewLookupOutcome: 'not_found'
       })
     ])
     await expect(resolveMobilePrPrefill(client, 'repo-1::/tmp/wt', baseArgs)).resolves.toEqual({
@@ -272,7 +273,8 @@ describe('resolveMobilePrPrefill', () => {
       body: 'Body',
       canCreate: true,
       blockedReason: null,
-      nextAction: null
+      nextAction: null,
+      reviewLookupOutcome: 'not_found'
     })
   })
 
@@ -286,7 +288,8 @@ describe('resolveMobilePrPrefill', () => {
         nextAction: 'push',
         defaultBaseRef: 'main',
         title: 'Add feature',
-        body: ''
+        body: '',
+        reviewLookupOutcome: 'not_found'
       })
     ])
     const prefill = await resolveMobilePrPrefill(client, 'repo-1::/tmp/wt', baseArgs)
@@ -302,7 +305,8 @@ describe('resolveMobilePrPrefill', () => {
         review: null,
         blockedReason: 'dirty',
         nextAction: 'commit',
-        defaultBaseRef: 'main'
+        defaultBaseRef: 'main',
+        reviewLookupOutcome: 'not_found'
       })
     ])
     const prefill = await resolveMobilePrPrefill(client, 'repo-1::/tmp/wt', baseArgs)
