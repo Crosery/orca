@@ -89,6 +89,30 @@ describe('getChecksPanelReviewState — precedence', () => {
     expect(state.openReviewUrl).toBe('https://x/pull/1')
   })
 
+  it('offers Open Review under a branch blocker when positive evidence has a trusted URL', () => {
+    // A concurrent branch blocker owns the copy but must not swallow the known
+    // review: Open Review is exposed while Create / Push & Create stay suppressed.
+    const state = getChecksPanelReviewState(
+      input({
+        reviewLookup: 'positive_unresolved',
+        openReviewUrl: 'https://x/pull/7',
+        eligibilityBlockedReason: 'no_upstream',
+        hasUpstream: false
+      })
+    )
+    expect(state.title).toBe('No upstream configured')
+    expect(state.workflowAction).toBe('publish_branch')
+    expect(state.composerMode).toBe('hidden')
+    expect(state.recovery).toContain('open_review')
+    expect(state.openReviewUrl).toBe('https://x/pull/7')
+  })
+
+  it('needs_sync emits a sync_branch workflow action for the renderer', () => {
+    const state = getChecksPanelReviewState(input({ eligibilityBlockedReason: 'needs_sync' }))
+    expect(state.title).toBe('Branch needs to sync')
+    expect(state.workflowAction).toBe('sync_branch')
+  })
+
   it('branch blocker (no_upstream) ranks above a refresh error', () => {
     const state = getChecksPanelReviewState(
       input({

@@ -313,7 +313,11 @@ export async function getMergeRequestForBranch(
   branch: string,
   linkedMRIid?: number | null,
   connectionId?: string | null,
-  options: HostedReviewExecutionOptions = {}
+  options: HostedReviewExecutionOptions = {},
+  // Why: the existing-review lookup behind Create must distinguish a real glab
+  // transport/auth failure from an accepted "no MR". When true, a failed lookup
+  // throws instead of collapsing to null so callers never report false not_found.
+  throwOnFailure = false
 ): Promise<MRInfo | null> {
   const branchName = branch.replace(/^refs\/heads\//, '')
   if (!branchName && linkedMRIid == null) {
@@ -369,11 +373,29 @@ export async function getMergeRequestForBranch(
     }
     const pipelineStatus = derivePipelineStatus(raw.head_pipeline ?? raw.pipeline ?? null)
     return mapMRInfo(raw, pipelineStatus)
-  } catch {
+  } catch (error) {
+    if (throwOnFailure) {
+      throw error
+    }
     return null
   } finally {
     release()
   }
+}
+
+/**
+ * Existing-review lookup that surfaces glab transport/auth failures instead of
+ * collapsing them to null, so a failed lookup becomes
+ * `reviewLookupOutcome: 'unavailable'` rather than a false "No merge request found".
+ */
+export function getMergeRequestForBranchOrThrow(
+  repoPath: string,
+  branch: string,
+  linkedMRIid?: number | null,
+  connectionId?: string | null,
+  options: HostedReviewExecutionOptions = {}
+): Promise<MRInfo | null> {
+  return getMergeRequestForBranch(repoPath, branch, linkedMRIid, connectionId, options, true)
 }
 
 function mrListStateFlags(state: MRListState): string[] {

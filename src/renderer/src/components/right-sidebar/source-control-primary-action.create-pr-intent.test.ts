@@ -39,7 +39,8 @@ describe('resolvePrimaryAction Create PR intent', () => {
           review: null,
           canCreate: false,
           blockedReason: 'no_upstream',
-          nextAction: 'publish'
+          nextAction: 'publish',
+          reviewLookupOutcome: 'not_found'
         }
       })
     )
@@ -63,7 +64,8 @@ describe('resolvePrimaryAction Create PR intent', () => {
           review: null,
           canCreate: false,
           blockedReason: 'needs_sync',
-          nextAction: 'sync'
+          nextAction: 'sync',
+          reviewLookupOutcome: 'not_found'
         }
       })
     )
@@ -79,7 +81,8 @@ describe('resolvePrimaryAction Create PR intent', () => {
         review: null,
         canCreate: false,
         blockedReason: 'needs_push',
-        nextAction: 'push'
+        nextAction: 'push',
+        reviewLookupOutcome: 'not_found'
       }
     })
     const result = resolvePrimaryAction(input)
@@ -110,7 +113,8 @@ describe('resolvePrimaryAction Create PR intent', () => {
           review: null,
           canCreate: false,
           blockedReason: 'dirty',
-          nextAction: 'commit'
+          nextAction: 'commit',
+          reviewLookupOutcome: 'not_found'
         }
       })
     )
@@ -132,7 +136,8 @@ describe('resolvePrimaryAction Create PR intent', () => {
             review: null,
             canCreate: false,
             blockedReason: 'dirty',
-            nextAction: 'commit'
+            nextAction: 'commit',
+            reviewLookupOutcome: 'not_found'
           }
         })
       )
@@ -154,7 +159,8 @@ describe('resolvePrimaryAction Create PR intent', () => {
         review: null,
         canCreate: false,
         blockedReason: 'dirty',
-        nextAction: 'commit'
+        nextAction: 'commit',
+        reviewLookupOutcome: 'not_found'
       }
     })
     const result = resolvePrimaryAction(input)
@@ -179,7 +185,8 @@ describe('resolvePrimaryAction Create PR intent', () => {
             review: null,
             canCreate: false,
             blockedReason: 'default_branch',
-            nextAction: null
+            nextAction: null,
+            reviewLookupOutcome: 'not_found'
           }
         })
       )
@@ -202,7 +209,8 @@ describe('resolvePrimaryAction Create PR intent', () => {
           review: null,
           canCreate: false,
           blockedReason: 'dirty',
-          nextAction: 'commit'
+          nextAction: 'commit',
+          reviewLookupOutcome: 'not_found'
         }
       })
     )
@@ -223,7 +231,8 @@ describe('resolvePrimaryAction Create PR intent', () => {
             review: null,
             canCreate: false,
             blockedReason: 'dirty',
-            nextAction: 'commit'
+            nextAction: 'commit',
+            reviewLookupOutcome: 'not_found'
           }
         })
       )
@@ -243,7 +252,8 @@ describe('resolvePrimaryAction Create PR intent', () => {
         review: null,
         canCreate: false,
         blockedReason: 'dirty',
-        nextAction: 'commit'
+        nextAction: 'commit',
+        reviewLookupOutcome: 'not_found'
       }
     })
 
@@ -272,7 +282,8 @@ describe('resolvePrimaryAction Create PR intent', () => {
             review: null,
             canCreate: false,
             blockedReason: 'needs_push',
-            nextAction: 'push'
+            nextAction: 'push',
+            reviewLookupOutcome: 'not_found'
           }
         })
       )
@@ -294,7 +305,8 @@ describe('resolvePrimaryAction Create PR intent', () => {
         review: null,
         canCreate: false,
         blockedReason: 'no_upstream',
-        nextAction: 'publish'
+        nextAction: 'publish',
+        reviewLookupOutcome: 'not_found'
       }
     })
 
@@ -327,7 +339,8 @@ describe('resolvePrimaryAction Create PR intent', () => {
         review: null,
         canCreate: false,
         blockedReason: 'needs_sync',
-        nextAction: 'sync'
+        nextAction: 'sync',
+        reviewLookupOutcome: 'not_found'
       }
     })
 
@@ -360,7 +373,8 @@ describe('resolvePrimaryAction Create PR intent', () => {
         review: null,
         canCreate: false,
         blockedReason: 'needs_sync',
-        nextAction: 'sync'
+        nextAction: 'sync',
+        reviewLookupOutcome: 'not_found'
       }
     })
 
@@ -382,7 +396,8 @@ describe('resolvePrimaryAction Create PR intent', () => {
             review: null,
             canCreate: true,
             blockedReason: null,
-            nextAction: null
+            nextAction: null,
+            reviewLookupOutcome: 'not_found'
           }
         })
       )
@@ -403,7 +418,8 @@ describe('resolvePrimaryAction Create PR intent', () => {
             review: null,
             canCreate: false,
             blockedReason: null,
-            nextAction: null
+            nextAction: null,
+            reviewLookupOutcome: 'not_found'
           },
           isHostedReviewCreationLoading: true
         })
@@ -425,7 +441,8 @@ describe('resolvePrimaryAction Create PR intent', () => {
             review: null,
             canCreate: true,
             blockedReason: null,
-            nextAction: null
+            nextAction: null,
+            reviewLookupOutcome: 'not_found'
           },
           isHostedReviewCreationLoading: true
         })
@@ -447,7 +464,8 @@ describe('resolvePrimaryAction Create PR intent', () => {
             review: null,
             canCreate: true,
             blockedReason: null,
-            nextAction: null
+            nextAction: null,
+            reviewLookupOutcome: 'not_found'
           },
           isHostedReviewCreationLoading: true
         })
@@ -471,7 +489,8 @@ describe('resolvePrimaryAction Create PR intent', () => {
             review: null,
             canCreate: false,
             blockedReason: 'no_upstream',
-            nextAction: 'publish'
+            nextAction: 'publish',
+            reviewLookupOutcome: 'not_found'
           }
         })
       )

@@ -6,6 +6,8 @@ import type {
 } from '../../../../shared/hosted-review'
 import {
   computeChecksPanelConfirmedReadiness,
+  isChecksPanelCreateEligibilityConfirmable,
+  isChecksPanelHardErrorCleared,
   isChecksPanelHardRefreshErrorType,
   resolveChecksPanelHostedReviewBaseRef,
   shouldOpenChecksPanelCreateComposer,
@@ -40,6 +42,55 @@ describe('resolveChecksPanelHostedReviewBaseRef', () => {
     expect(
       resolveChecksPanelHostedReviewBaseRef({ worktreeBaseRef: null, repoBaseRef: null })
     ).toBe(null)
+  })
+})
+
+describe('isChecksPanelCreateEligibilityConfirmable (shared desktop/mobile floor)', () => {
+  const base = { reviewLookup: 'not_found' as const, hasHardRefreshError: false }
+
+  it('allows canCreate and needs_push when nothing hard-blocks', () => {
+    expect(isChecksPanelCreateEligibilityConfirmable({ ...base, eligibility: eligibility() })).toBe(
+      true
+    )
+    expect(
+      isChecksPanelCreateEligibilityConfirmable({
+        ...base,
+        eligibility: eligibility({ canCreate: false, blockedReason: 'needs_push' })
+      })
+    ).toBe(true)
+  })
+
+  it('fails closed on every hard-block: null, existing_review, positive, hard error, unavailable', () => {
+    expect(isChecksPanelCreateEligibilityConfirmable({ ...base, eligibility: null })).toBe(false)
+    expect(
+      isChecksPanelCreateEligibilityConfirmable({
+        ...base,
+        eligibility: eligibility({ canCreate: false, blockedReason: 'existing_review' })
+      })
+    ).toBe(false)
+    expect(
+      isChecksPanelCreateEligibilityConfirmable({
+        ...base,
+        eligibility: eligibility(),
+        reviewLookup: 'positive_unresolved'
+      })
+    ).toBe(false)
+    expect(
+      isChecksPanelCreateEligibilityConfirmable({
+        ...base,
+        eligibility: eligibility(),
+        hasHardRefreshError: true
+      })
+    ).toBe(false)
+    expect(
+      isChecksPanelCreateEligibilityConfirmable({
+        ...base,
+        eligibility: eligibility({
+          blockedReason: 'needs_push',
+          reviewLookupOutcome: 'unavailable'
+        })
+      })
+    ).toBe(false)
   })
 })
 
@@ -212,6 +263,16 @@ describe('computeChecksPanelConfirmedReadiness', () => {
     ).toBe(false)
   })
 
+  it('preserves confirmed across a transient refresh failure once past the error', () => {
+    // The panel keeps the last confirmed eligibility snapshot; a transient
+    // failure (no hard error observed) must not drop confirmed.
+    expect(
+      computeChecksPanelConfirmedReadiness(
+        readiness({ hardErrorObservedAt: undefined, reviewLookup: 'not_found' })
+      )
+    ).toEqual({ confirmed: true, needsPush: false })
+  })
+
   describe('hard error clearing', () => {
     it('clears when the request started strictly after the error with an accepted outcome', () => {
       expect(
@@ -228,10 +289,7 @@ describe('computeChecksPanelConfirmedReadiness', () => {
     it('does not clear for an in-flight request that started before the error', () => {
       expect(
         computeChecksPanelConfirmedReadiness(
-          readiness({
-            hardErrorObservedAt: NOW - 1_500,
-            eligibilityRequestStartedAt: NOW - 2_000
-          })
+          readiness({ hardErrorObservedAt: NOW - 1_500, eligibilityRequestStartedAt: NOW - 2_000 })
         ).confirmed
       ).toBe(false)
     })
@@ -251,6 +309,78 @@ describe('computeChecksPanelConfirmedReadiness', () => {
         ).confirmed
       ).toBe(false)
     })
+  })
+})
+
+describe('isChecksPanelHardErrorCleared', () => {
+  const NOW = 1_000_000
+  function cleared(
+    overrides: Partial<ChecksPanelConfirmedReadinessInput> = {}
+  ): ChecksPanelConfirmedReadinessInput {
+    return {
+      contextKeyMatches: true,
+      eligibility: { canCreate: true, blockedReason: null, reviewLookupOutcome: 'not_found' },
+      eligibilityCompletedAt: NOW - 1_000,
+      eligibilityRequestStartedAt: NOW - 2_000,
+      reviewLookup: 'not_found',
+      hardErrorObservedAt: NOW - 3_000,
+      gitSnapshotMatches: true,
+      now: NOW,
+      ...overrides
+    }
+  }
+
+  it('is cleared (true) when no hard error is observed', () => {
+    expect(isChecksPanelHardErrorCleared(cleared({ hardErrorObservedAt: undefined }))).toBe(true)
+  })
+
+  it('stays blocked while only a queued/in-flight retry replaced the error', () => {
+    // No request that both started after the error and settled with an accepted
+    // outcome, so Create must not flap back.
+    expect(isChecksPanelHardErrorCleared(cleared({ eligibilityRequestStartedAt: undefined }))).toBe(
+      false
+    )
+  })
+
+  it('stays blocked for a request that started before the error', () => {
+    expect(
+      isChecksPanelHardErrorCleared(
+        cleared({ hardErrorObservedAt: NOW - 1_000, eligibilityRequestStartedAt: NOW - 2_000 })
+      )
+    ).toBe(false)
+  })
+
+  it('stays blocked when the clearing request is for a different context', () => {
+    expect(isChecksPanelHardErrorCleared(cleared({ contextKeyMatches: false }))).toBe(false)
+  })
+
+  it('stays blocked on an unavailable outcome even if the request started after', () => {
+    expect(
+      isChecksPanelHardErrorCleared(
+        cleared({
+          eligibility: {
+            canCreate: false,
+            blockedReason: 'no_upstream',
+            reviewLookupOutcome: 'unavailable'
+          }
+        })
+      )
+    ).toBe(false)
+  })
+
+  it('clears when a later request settles found or not_found', () => {
+    expect(isChecksPanelHardErrorCleared(cleared())).toBe(true)
+    expect(
+      isChecksPanelHardErrorCleared(
+        cleared({
+          eligibility: {
+            canCreate: false,
+            blockedReason: 'existing_review',
+            reviewLookupOutcome: 'found'
+          }
+        })
+      )
+    ).toBe(true)
   })
 })
 

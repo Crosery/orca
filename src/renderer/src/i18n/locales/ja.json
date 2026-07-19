@@ -9145,9 +9145,13 @@
             "495b2f8c4b": "agent を開始しましたが、選択したコメントを解決済みにできませんでした。",
             "3c3ad3a1d2": "agent を開始しました。選択したコメントにホスト上で解決済みにできるものはありません。",
             "review": {
-              "auto_retry": "Orca will retry at {{time}}.",
-              "open_review": "Open Review",
-              "retry": "Retry"
+              "auto_retry": "Orca は {{time}} に再試行します。",
+              "open_review": "レビューを開く",
+              "retry": "再試行"
+            },
+            "sync": {
+              "pending": "Syncing…",
+              "branch": "Sync Branch"
             }
           },
           "CreatePullRequestDialog": {
@@ -9762,132 +9766,132 @@
               },
               "review": {
                 "detail": {
-                  "positive": "Orca also has saved {{reviewLabel}} information that it could not verify.",
-                  "rate_limited": "Orca also could not check {{reviewLabel}} status because {{provider}} is temporarily limiting requests.",
-                  "network": "Orca also could not check {{reviewLabel}} status because this environment could not reach {{provider}}.",
-                  "untyped": "Orca also could not confirm whether this branch already has a {{reviewLabel}}."
+                  "positive": "Orca は保存された {{reviewLabel}} 情報を持っていますが、検証できませんでした。",
+                  "rate_limited": "Orca は {{provider}} がリクエストを一時的に制限しているため、{{reviewLabel}} ステータスを確認できませんでした。",
+                  "network": "Orca はこの環境から {{provider}} に接続できないため、{{reviewLabel}} ステータスを確認できませんでした。",
+                  "untyped": "Orca はこのブランチに {{reviewLabel}} が既に存在するかどうかを確認できませんでした。"
                 },
                 "positive": {
-                  "title": "{{reviewLabelCap}} details unavailable",
-                  "body": "Orca has saved {{reviewLabel}} information for this branch but could not confirm its current status."
+                  "title": "{{reviewLabelCap}} の詳細が利用できません",
+                  "body": "Orca はこのブランチの {{reviewLabel}} 情報を保存しましたが、現在のステータスを確認できませんでした。"
                 },
                 "no_review": {
-                  "title": "No {{reviewLabel}} found",
-                  "body": "Create a {{reviewLabel}} to start checks and review."
+                  "title": "{{reviewLabel}} が見つかりません",
+                  "body": "{{reviewLabel}} を作成して、チェックとレビューを開始します。"
                 },
                 "active": {
-                  "title": "Checking {{reviewLabel}} status",
-                  "body": "Orca is checking {{provider}} for a {{reviewLabel}} on this branch."
+                  "title": "{{reviewLabel}} ステータスを確認中",
+                  "body": "Orca はこのブランチの {{provider}} 上の {{reviewLabel}} を確認しています。"
                 },
                 "git_loading": {
-                  "title": "Checking branch status",
-                  "body": "Orca is checking this branch before showing create or publish actions."
+                  "title": "ブランチのステータスを確認中",
+                  "body": "Orca はこのブランチの作成または公開アクションを表示する前に確認しています。"
                 },
                 "git_error": {
-                  "title": "Could not check branch status",
-                  "body": "Orca could not confirm this branch's upstream from this environment. Retry before publishing or creating a {{reviewLabel}}."
+                  "title": "ブランチのステータスを確認できませんでした",
+                  "body": "Orca はこの環境からこのブランチのアップストリームを確認できませんでした。公開または {{reviewLabel}} の作成前に再試行してください。"
                 },
                 "unknown": {
-                  "title": "{{reviewLabelCap}} status unavailable",
-                  "body": "Orca has not confirmed the {{reviewLabel}} status for this branch. Retry to check again."
+                  "title": "{{reviewLabelCap}} ステータスが利用できません",
+                  "body": "Orca はこのブランチの {{reviewLabel}} ステータスを確認していません。再試行して再度確認してください。"
                 },
                 "paused": {
-                  "title": "{{provider}} refresh paused",
-                  "body": "{{provider}} is temporarily limiting requests. This can happen even when the displayed API quota is not exhausted."
+                  "title": "{{provider}} の更新が一時停止されています",
+                  "body": "{{provider}} がリクエストを一時的に制限しています。表示された API クォータが枯渇していない場合でも発生する可能性があります。"
                 },
                 "network": {
-                  "title": "Could not reach {{provider}}",
-                  "body": "This environment could not reach {{provider}}. Check its connection, then retry."
+                  "title": "{{provider}} に接続できませんでした",
+                  "body": "この環境から {{provider}} に接続できませんでした。接続を確認して再試行してください。"
                 },
                 "unknown_error": {
-                  "title": "Could not check {{reviewLabel}} status",
-                  "body": "The lookup failed, so Orca could not confirm whether this branch already has a {{reviewLabel}}."
+                  "title": "{{reviewLabel}} ステータスを確認できませんでした",
+                  "body": "検索に失敗したため、Orca はこのブランチに {{reviewLabel}} が既に存在するかどうかを確認できませんでした。"
                 },
                 "untyped": {
-                  "title": "{{reviewLabelCap}} status unavailable",
-                  "body": "Orca could not confirm whether this branch already has a {{reviewLabel}}. Retry to check again."
+                  "title": "{{reviewLabelCap}} ステータスが利用できません",
+                  "body": "Orca はこのブランチに {{reviewLabel}} が既に存在するかどうかを確認できませんでした。再試行して再度確認してください。"
                 },
                 "auth": {
-                  "title": "{{provider}} authentication failed",
-                  "body": "{{provider}} could not authenticate the credentials available in this environment. Check the {{provider}} login or environment token, then retry."
+                  "title": "{{provider}} の認証に失敗しました",
+                  "body": "{{provider}} はこの環境で使用可能な資格情報を認証できませんでした。{{provider}} のログインまたは環境トークンを確認して再試行してください。"
                 },
                 "permission": {
-                  "title": "{{provider}} access denied",
-                  "body": "The current {{provider}} credentials cannot read this repository's {{reviewLabel}}s. Check the account, token scopes, and repository access, then retry."
+                  "title": "{{provider}} のアクセスが拒否されました",
+                  "body": "現在の {{provider}} の資格情報ではこのリポジトリの {{reviewLabel}} を読み取れません。アカウント、トークンスコープ、リポジトリのアクセス権を確認して再試行してください。"
                 },
                 "repo": {
-                  "title": "{{provider}} repository unavailable",
-                  "body": "{{provider}} could not resolve or access the repository for the current remote and account. Check the remote and repository access, then retry."
+                  "title": "{{provider}} リポジトリが利用できません",
+                  "body": "{{provider}} は現在のリモートとアカウントのリポジトリを解決またはアクセスできませんでした。リモートとリポジトリのアクセス権を確認して再試行してください。"
                 },
                 "cli": {
-                  "title": "{{provider}} CLI unavailable",
-                  "body": "Orca could not run {{provider}} CLI in this environment. Set it up here, then retry."
+                  "title": "{{provider}} CLI が利用できません",
+                  "body": "Orca はこの環境で {{provider}} CLI を実行できませんでした。ここでセットアップして再試行してください。"
                 },
                 "skipped": {
                   "disconnected": {
-                    "title": "Host disconnected",
-                    "body": "This repository's execution host is disconnected, so Orca cannot refresh {{reviewLabel}} status."
+                    "title": "ホストが切断されました",
+                    "body": "このリポジトリの実行ホストが切断されたため、Orca は {{reviewLabel}} ステータスを更新できません。"
                   },
                   "bare": {
-                    "title": "Bare repository",
-                    "body": "This repository is bare, so {{reviewLabel}} status is not available here."
+                    "title": "ベアリポジトリ",
+                    "body": "このリポジトリはベアリポジトリであるため、{{reviewLabel}} ステータスはここでは利用できません。"
                   },
                   "archived": {
-                    "title": "Repository archived",
-                    "body": "This repository is archived, so Orca is not refreshing {{reviewLabel}} status."
+                    "title": "リポジトリがアーカイブされています",
+                    "body": "このリポジトリはアーカイブされているため、Orca は {{reviewLabel}} ステータスを更新しません。"
                   },
                   "not_git": {
-                    "title": "Not a Git repository",
-                    "body": "Orca could not treat this folder as a Git repository for {{reviewLabel}} status."
+                    "title": "Git リポジトリではありません",
+                    "body": "Orca はこのフォルダを {{reviewLabel}} ステータス用の Git リポジトリとして扱えませんでした。"
                   },
                   "remote": {
-                    "title": "Remote-only context",
-                    "body": "Orca could not refresh {{reviewLabel}} status for this remote context. Retry after the host is available."
+                    "title": "リモートのみのコンテキスト",
+                    "body": "Orca はこのリモートコンテキストの {{reviewLabel}} ステータスを更新できませんでした。ホストが利用可能になった後に再試行してください。"
                   }
                 },
                 "no_upstream": {
-                  "title": "No upstream configured",
-                  "body": "Publish this branch to set its upstream before creating a {{reviewLabel}}."
+                  "title": "アップストリームが設定されていません",
+                  "body": "このブランチを公開してアップストリームを設定してから {{reviewLabel}} を作成してください。"
                 },
                 "needs_sync": {
-                  "title": "Branch needs to sync",
-                  "body": "Sync this branch with its upstream before creating a {{reviewLabel}}."
+                  "title": "ブランチの同期が必要です",
+                  "body": "{{reviewLabel}} を作成する前に、このブランチをアップストリームと同期してください。"
                 },
                 "auth_required": {
-                  "title": "Connect {{provider}}",
-                  "body": "{{provider}} must be connected in this environment before Orca can create a {{reviewLabel}}."
+                  "title": "{{provider}} を接続してください",
+                  "body": "Orca が {{reviewLabel}} を作成する前に、この環境で {{provider}} を接続する必要があります。"
                 },
                 "needs_push": {
-                  "title": "Branch has unpushed commits",
-                  "body": "Push the latest commits before creating a {{reviewLabel}}."
+                  "title": "ブランチに未プッシュのコミットがあります",
+                  "body": "{{reviewLabel}} を作成する前に、最新のコミットをプッシュしてください。"
                 },
                 "existing": {
-                  "title": "{{reviewLabelCap}} already exists",
-                  "body": "Orca found an existing {{reviewLabel}} for this branch."
+                  "title": "{{reviewLabelCap}} は既に存在します",
+                  "body": "Orca はこのブランチの既存の {{reviewLabel}} を見つけました。"
                 },
                 "detached": {
-                  "title": "No current branch",
-                  "body": "Check out a branch before creating a {{reviewLabel}}."
+                  "title": "現在のブランチがありません",
+                  "body": "{{reviewLabel}} を作成する前にブランチをチェックアウトしてください。"
                 },
                 "dirty": {
-                  "title": "Commit changes first",
-                  "body": "Commit or stash your changes before creating a {{reviewLabel}}."
+                  "title": "まず変更をコミットしてください",
+                  "body": "{{reviewLabel}} を作成する前に、変更をコミットまたはスタッシュしてください。"
                 },
                 "default_branch": {
-                  "title": "On the default branch",
-                  "body": "Switch to a feature branch before creating a {{reviewLabel}}."
+                  "title": "デフォルトブランチ上です",
+                  "body": "{{reviewLabel}} を作成する前に、フィーチャーブランチに切り替えてください。"
                 },
                 "fork": {
-                  "title": "Fork head unsupported",
-                  "body": "Orca cannot create a {{reviewLabel}} from this fork head here."
+                  "title": "フォークヘッドはサポートされていません",
+                  "body": "Orca はここからこのフォークヘッドの {{reviewLabel}} を作成できません。"
                 },
                 "base_missing": {
-                  "title": "Base branch not on remote",
-                  "body": "This branch's base is not on the remote yet, so a {{reviewLabel}} cannot target it."
+                  "title": "ベースブランチがリモートにありません",
+                  "body": "このブランチのベースがまだリモートにないため、{{reviewLabel}} をターゲットにできません。"
                 },
                 "unsupported": {
-                  "title": "{{reviewLabelCap}} not supported here",
-                  "body": "This repository provider does not support creating a {{reviewLabel}} from Orca."
+                  "title": "ここでは {{reviewLabelCap}} はサポートされていません",
+                  "body": "このリポジトリプロバイダーは、Orca からの {{reviewLabel}} の作成をサポートしていません。"
                 }
               }
             }

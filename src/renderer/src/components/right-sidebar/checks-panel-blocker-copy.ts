@@ -168,7 +168,15 @@ export function branchBlockerState(
   const { reviewLabel, providerName } = input
   const detail = concurrentLookupDetail(input)
   const schedule = detail ? autoRetrySchedule(input) : {}
-  const lookupRecovery: ChecksPanelRecoveryAction[] = detail ? ['retry'] : []
+  // Positive-unresolved evidence with a trusted URL must still expose Open Review
+  // beneath the blocker (Create/Push & Create stay suppressed). Retry is offered
+  // whenever a concurrent lookup failure produced a detail sentence.
+  const canOpenReview = input.reviewLookup === 'positive_unresolved' && Boolean(input.openReviewUrl)
+  const lookupRecovery: ChecksPanelRecoveryAction[] = [
+    ...(canOpenReview ? (['open_review'] as ChecksPanelRecoveryAction[]) : []),
+    ...(detail ? (['retry'] as ChecksPanelRecoveryAction[]) : [])
+  ]
+  const openReviewUrl = canOpenReview ? input.openReviewUrl : undefined
   const vars = { reviewLabel, provider: providerName }
 
   if (reason === 'needs_push') {
@@ -192,7 +200,7 @@ export function branchBlockerState(
       composerMode: blocked ? 'hidden' : 'needs_push_open',
       workflowAction: blocked ? null : 'push_and_create',
       recovery: lookupRecovery,
-      openReviewUrl: input.reviewLookup === 'positive_unresolved' ? input.openReviewUrl : undefined,
+      openReviewUrl,
       ...schedule
     }
   }
@@ -206,6 +214,7 @@ export function branchBlockerState(
     composerMode: 'hidden',
     workflowAction: copy.workflow,
     recovery: lookupRecovery,
+    openReviewUrl,
     ...schedule
   }
 }

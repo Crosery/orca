@@ -60,7 +60,8 @@ import type {
   PRInfo,
   PRCheckDetail,
   PRCheckRunDetails,
-  PRComment
+  PRComment,
+  PRRefreshErrorType
 } from '../../../../shared/types'
 import { getConnectionId } from '@/lib/connection-context'
 import {
@@ -82,6 +83,7 @@ import type {
   HostedReviewProvider
 } from '../../../../shared/hosted-review'
 import { resolveHostedReviewCreationProvider } from '../../../../shared/hosted-review-creation-providers'
+import { normalizeGlobalWindowsRuntimeDefault } from '../../../../shared/project-execution-runtime'
 import { normalizeHostedReviewHeadRef } from '../../../../shared/hosted-review-refs'
 import { getHostedReviewCacheKey, refreshHostedReviewCard } from '@/store/slices/hosted-review'
 import { toast } from 'sonner'
@@ -104,8 +106,10 @@ import {
 } from './checks-panel-empty-state'
 import { resolveChecksPanelReviewLookup } from './checks-panel-review-lookup-authority'
 import {
+  computeChecksPanelConfirmedReadiness,
+  isChecksPanelHardErrorCleared,
   isChecksPanelHardRefreshErrorType,
-  shouldOpenChecksPanelCreateComposer
+  type ChecksPanelConfirmedReadinessInput
 } from './checks-panel-review-creation'
 import { recordChecksPanelPRRefreshBreadcrumb } from './checks-panel-pr-refresh-breadcrumb'
 import {
@@ -184,10 +188,45 @@ const GIT_STATUS_FAILURE_RETRY_MS = 3000
 
 type HostedReviewCreationSnapshot = {
   requestKey: string
+  /** Panel context key (repo/worktree/branch/host) at request time. */
+  contextKey: string
   repoId: string
   worktreeId: string | null
   branch: string
+  /** Wall-clock time the eligibility request started (hard-error clear ordering). */
+  requestStartedAt: number
+  /** Wall-clock time the eligibility result settled (confirmed freshness window). */
+  completedAt: number
+  /** Git snapshot fingerprint used for this eligibility (confirmed freshness). */
+  gitFingerprint: string
   data: HostedReviewCreationEligibility
+}
+
+// Confirmed readiness must drop when HEAD, dirty, upstream, base, or the
+// execution host move under the eligibility that produced it. Fingerprint those
+// fields so a stale snapshot cannot keep an enabled Create open.
+function buildChecksPanelEligibilityGitFingerprint(input: {
+  headOid: string | null
+  hasUncommittedChanges: boolean | undefined
+  hasUpstream: boolean | undefined
+  ahead: number | undefined
+  behind: number | undefined
+  base: string | null
+  runtimeEnvironmentId: string | null
+  repoConnectionId: string | null
+  localExecutionScope: string | null
+}): string {
+  return JSON.stringify({
+    headOid: input.headOid ?? null,
+    hasUncommittedChanges: input.hasUncommittedChanges ?? null,
+    hasUpstream: input.hasUpstream ?? null,
+    ahead: input.ahead ?? null,
+    behind: input.behind ?? null,
+    base: input.base ?? null,
+    runtimeEnvironmentId: input.runtimeEnvironmentId ?? null,
+    repoConnectionId: input.repoConnectionId ?? null,
+    localExecutionScope: input.localExecutionScope ?? null
+  })
 }
 
 type ChecksAgentComposerState = {
@@ -419,6 +458,7 @@ export default function ChecksPanel(): React.JSX.Element {
   )
   const isRemoteOperationActive = useAppStore((s) => s.isRemoteOperationActive)
   const pushBranch = useAppStore((s) => s.pushBranch)
+  const syncBranch = useAppStore((s) => s.syncBranch)
   const fetchUpstreamStatus = useAppStore((s) => s.fetchUpstreamStatus)
   const setRightSidebarOpen = useAppStore((s) => s.setRightSidebarOpen)
   const setRightSidebarTab = useAppStore((s) => s.setRightSidebarTab)
@@ -455,6 +495,7 @@ export default function ChecksPanel(): React.JSX.Element {
   const [isCreatingPr, setIsCreatingPr] = useState(false)
   const [createPrError, setCreatePrError] = useState<string | null>(null)
   const [isPublishingBranch, setIsPublishingBranch] = useState(false)
+  const [isSyncingBranch, setIsSyncingBranch] = useState(false)
   const isResolvingConflictsWithAI = false
   const [isFixingChecksWithAI, setIsFixingChecksWithAI] = useState(false)
   const [agentComposerState, setAgentComposerState] = useState<ChecksAgentComposerState | null>(
@@ -462,10 +503,28 @@ export default function ChecksPanel(): React.JSX.Element {
   )
   const [hostedReviewCreationSnapshot, setHostedReviewCreationSnapshot] =
     useState<HostedReviewCreationSnapshot | null>(null)
+  // Sticky observation of the most recent hard refresh error for the exact
+  // context. Persisted across queued/in-flight auto-retries so Create cannot
+  // flap back until a qualifying eligibility request clears it.
+  const [hardRefreshError, setHardRefreshError] = useState<{
+    observedAt: number
+    errorType: PRRefreshErrorType
+    contextKey: string
+  } | null>(null)
   const [gitStatusSnapshot, setGitStatusSnapshot] = useState<ChecksPanelGitStatusSnapshot | null>(
     null
   )
+  // Context key whose git-status probe failed with no usable snapshot, so the
+  // empty state can distinguish "checking branch status" from "could not check".
+  const [gitStatusProbeErrorContextKey, setGitStatusProbeErrorContextKey] = useState<string | null>(
+    null
+  )
   const [gitStatusRefreshNonce, setGitStatusRefreshNonce] = useState(0)
+  // Bumped by a manual Retry/Refresh so eligibility re-runs even when the Git
+  // snapshot is unchanged. A hard error can only be cleared by an eligibility
+  // request that started strictly after the error, so an auth fix followed by
+  // Retry (which does not change Git state) must still trigger a fresh request.
+  const [eligibilityRefreshNonce, setEligibilityRefreshNonce] = useState(0)
   const [editingTitle, setEditingTitle] = useState(false)
   const [titleDraft, setTitleDraft] = useState('')
   const [titleSaving, setTitleSaving] = useState(false)
@@ -546,6 +605,16 @@ export default function ChecksPanel(): React.JSX.Element {
     [runtimeEnvironmentId, settings]
   )
   const repoConnectionId = repo?.connectionId?.trim() || null
+  // Local execution host variant (`wsl:{distro}` vs `host`). WSL is a local-host
+  // variant, not a runtime/SSH host, so it only applies when execution is local;
+  // remote contexts are already scoped by runtimeEnvironmentId / connectionId.
+  const localExecutionScope = useMemo<string | null>(() => {
+    if (runtimeEnvironmentId != null || repoConnectionId != null) {
+      return null
+    }
+    const localRuntime = normalizeGlobalWindowsRuntimeDefault(settings?.localWindowsRuntimeDefault)
+    return localRuntime.kind === 'wsl' ? `wsl:${localRuntime.distro ?? ''}` : 'host'
+  }, [runtimeEnvironmentId, repoConnectionId, settings?.localWindowsRuntimeDefault])
   const sshConnectionStatus = useAppStore((s) =>
     repoConnectionId ? s.sshConnectionStates.get(repoConnectionId)?.status : undefined
   )
@@ -561,6 +630,7 @@ export default function ChecksPanel(): React.JSX.Element {
     linkedGiteaPR: activeWorktree?.linkedGiteaPR ?? null,
     runtimeEnvironmentId,
     repoConnectionId,
+    localExecutionScope,
     pushTarget: activeWorktreePushTarget
   })
   const panelContextKeyRef = useRef(panelContextKey)
@@ -610,7 +680,9 @@ export default function ChecksPanel(): React.JSX.Element {
     setIsPublishingBranch(false)
     setAgentComposerState(null)
     setHostedReviewCreationSnapshot(null)
+    setHardRefreshError(null)
     setGitStatusSnapshot(null)
+    setGitStatusProbeErrorContextKey(null)
     setGitStatusRefreshNonce((value) => value + 1)
     pollIntervalRef.current = 30_000
     prevChecksRef.current = ''
@@ -753,6 +825,25 @@ export default function ChecksPanel(): React.JSX.Element {
     panelVisibleSinceRef.current = Date.now()
   }, [isPanelVisible, panelContextKey])
 
+  // Record the latest hard refresh error for the exact context. Kept sticky
+  // (only cleared via computeChecksPanelConfirmedReadiness) so a background
+  // queued/in-flight auto-retry — which replaces `status: 'error'` — cannot
+  // silently re-enable Create while the lookup is still impossible here.
+  useEffect(() => {
+    const errorType = prRefreshState?.status === 'error' ? prRefreshState.errorType : undefined
+    if (!isChecksPanelHardRefreshErrorType(errorType)) {
+      return
+    }
+    const observedAt = prRefreshState?.updatedAt ?? Date.now()
+    const contextKey = panelContextKeyRef.current
+    setHardRefreshError((prev) => {
+      if (prev && prev.contextKey === contextKey && prev.observedAt >= observedAt) {
+        return prev
+      }
+      return { observedAt, errorType: errorType as PRRefreshErrorType, contextKey }
+    })
+  }, [prRefreshState])
+
   // Why: select only timestamps (not whole cache records) so the entry-refresh
   // effect doesn't re-run on every cache mutation. See
   // docs/refresh-on-checks-tab.md.
@@ -829,6 +920,27 @@ export default function ChecksPanel(): React.JSX.Element {
   const gitStatusReadyForPanelContext = gitStatusInputs.hasUncommittedChanges !== undefined
   const hasUncommittedChanges = gitStatusInputs.hasUncommittedChanges
   const remoteStatus = gitStatusInputs.remoteStatus
+  const eligibilityHeadOid =
+    gitStatusSnapshot?.contextKey === panelContextKey
+      ? (gitStatusSnapshot.gitIdentity?.head ?? null)
+      : null
+  // Read at eligibility request time via a ref so a HEAD move drops confirmed
+  // (fingerprint mismatch) without re-triggering the eligibility network call.
+  const eligibilityHeadOidRef = useRef(eligibilityHeadOid)
+  eligibilityHeadOidRef.current = eligibilityHeadOid
+  const eligibilityGitFingerprint = gitStatusReadyForPanelContext
+    ? buildChecksPanelEligibilityGitFingerprint({
+        headOid: eligibilityHeadOid,
+        hasUncommittedChanges,
+        hasUpstream: remoteStatus?.hasUpstream,
+        ahead: remoteStatus?.ahead,
+        behind: remoteStatus?.behind,
+        base: repo?.worktreeBaseRef ?? null,
+        runtimeEnvironmentId,
+        repoConnectionId,
+        localExecutionScope
+      })
+    : null
   // Why: Create PR eligibility waits for the stricter panel snapshot, but the
   // Publish affordance can use the active worktree poller when SSH snapshot
   // refresh is delayed; publishing is still blocked for dirty fallback status.
@@ -848,21 +960,70 @@ export default function ChecksPanel(): React.JSX.Element {
   const hostedReviewCreateProvider = resolveHostedReviewCreationProvider(
     hostedReviewCreation?.provider
   )
+  // Only GitHub contexts run the gh-based PR refresh coordinator. Bitbucket /
+  // Azure DevOps / Gitea / GitLab must never be driven by (or show copy from) a
+  // GitHub `gh` failure — that would hide a valid composer and mislabel the CLI.
+  // Prefer the resolved eligibility provider (authoritative); before it resolves,
+  // treat a non-GitHub linked review as a definite non-GitHub signal and stay
+  // GitHub-optimistic otherwise so GitHub status is not delayed on initial load.
+  // (`resolveHostedReviewCreationProvider` defaults null → 'github', so the raw
+  // value cannot distinguish "unknown" from "GitHub".)
+  const hasNonGitHubLinkedReview =
+    activeWorktree?.linkedGitLabMR != null ||
+    activeWorktree?.linkedBitbucketPR != null ||
+    activeWorktree?.linkedAzureDevOpsPR != null ||
+    activeWorktree?.linkedGiteaPR != null
+  const isGitHubReviewContext = hostedReviewCreation
+    ? hostedReviewCreation.provider === 'github'
+    : !hasNonGitHubLinkedReview
   const hostedReviewCreateCopy = localizedHostedReviewCopy(hostedReviewCreateProvider)
+  // The PR cache is branch/host scoped but not push-target scoped, so an accepted
+  // no-PR fetched for a previous push target could alias as `not_found` after the
+  // push target (or other exact-context field) changes. When an eligibility
+  // snapshot exists for a *different* context than the current one, the context
+  // has moved and that branch-scoped no-PR is not authoritative for it — demote
+  // it to unknown until eligibility re-resolves. Same-context background churn
+  // (snapshot matches, or no snapshot yet) keeps the sticky no-review intact.
+  const prCachedHasPRForContext =
+    hostedReviewCreationSnapshot && hostedReviewCreationSnapshot.contextKey !== panelContextKey
+      ? null
+      : prCachedHasPR
   // Four-state review evidence: replaces the old ambiguous-GitHub boolean so the
   // empty state can never claim "No review found" without accepted evidence.
   const checksPanelReviewLookupResult = resolveChecksPanelReviewLookup({
     pr,
-    prCachedHasPR,
+    prCachedHasPR: prCachedHasPRForContext,
     hostedReview,
     linkedReviewNumber,
     eligibilityReviewLookupOutcome: hostedReviewCreation?.reviewLookupOutcome ?? null,
     eligibilityReview: hostedReviewCreation?.review ?? null
   })
   const checksPanelReviewLookup = checksPanelReviewLookupResult.state
+  // Confirmed readiness for the exact context, computed from the last confirmed
+  // eligibility snapshot rather than live `canCreate` (which would be circular
+  // and would flap during transient refresh/eligibility failures). This both
+  // gates the composer and clears the sticky hard-error block below.
+  const hardErrorObservedAt =
+    isGitHubReviewContext && hardRefreshError && hardRefreshError.contextKey === panelContextKey
+      ? hardRefreshError.observedAt
+      : undefined
+  const confirmedReadinessInput: ChecksPanelConfirmedReadinessInput = {
+    contextKeyMatches: hostedReviewCreationSnapshot?.contextKey === panelContextKey,
+    eligibility: hostedReviewCreationSnapshot?.data ?? null,
+    eligibilityCompletedAt: hostedReviewCreationSnapshot?.completedAt,
+    eligibilityRequestStartedAt: hostedReviewCreationSnapshot?.requestStartedAt,
+    reviewLookup: checksPanelReviewLookup,
+    hardErrorObservedAt,
+    gitSnapshotMatches:
+      eligibilityGitFingerprint !== null &&
+      hostedReviewCreationSnapshot?.gitFingerprint === eligibilityGitFingerprint,
+    now: Date.now()
+  }
+  const confirmedReadiness = computeChecksPanelConfirmedReadiness(confirmedReadinessInput)
+  // A hard error stays active across auto-retries until a qualifying eligibility
+  // request clears it, so `status: 'queued' | 'in-flight'` no longer un-hides Create.
   const checksPanelHasHardRefreshError =
-    prRefreshState?.status === 'error' &&
-    isChecksPanelHardRefreshErrorType(prRefreshState.errorType)
+    hardErrorObservedAt !== undefined && !isChecksPanelHardErrorCleared(confirmedReadinessInput)
   const activePullRequestGenerationKey = getPullRequestGenerationRecordKey({
     worktreeId: activeWorktreeId,
     worktreePath: activeWorktreePath,
@@ -938,17 +1099,12 @@ export default function ChecksPanel(): React.JSX.Element {
     () => (settings ? resolveSourceControlAiEnabled({ settings, repo }) : false),
     [repo, settings]
   )
-  // Confirmed-only composer gate: keeps canCreate / needs_push semantics and
-  // hard-blocks on positive unresolved evidence or a hard refresh error so
-  // Create / Push & Create never appears when review existence is ambiguous.
-  const createComposerOpen = shouldOpenChecksPanelCreateComposer({
-    activeReview,
-    isFolder,
-    branch,
-    hostedReviewCreation,
-    reviewLookup: checksPanelReviewLookup,
-    hasHardRefreshError: checksPanelHasHardRefreshError
-  })
+  // Confirmed-only composer gate. Driven by confirmed readiness (context match,
+  // fresh eligibility, matching git snapshot, cleared hard error) so an
+  // already-confirmed composer survives transient refresh/eligibility failures
+  // but a refresh failure never *opens* a never-confirmed Create.
+  const createComposerOpen =
+    !isFolder && !activeReview && Boolean(branch) && confirmedReadiness.confirmed
   const handleGeneratePullRequestFieldsForActive = useCallback(
     async (
       fields: PullRequestGenerationFields,
@@ -1145,6 +1301,9 @@ export default function ChecksPanel(): React.JSX.Element {
     submitting: isCreatingPr,
     prCreationDefaults,
     sourceControlAiActionsVisible,
+    // Preserve the draft when a hard refresh error hides the composer so the
+    // user's title/body/base survive recovery for the same exact context.
+    retainDraftWhenClosed: true,
     generation: {
       generating: activePullRequestGenerationRecord?.status === 'running',
       generateError: activePullRequestGenerationRecord?.error ?? null,
@@ -1256,7 +1415,10 @@ export default function ChecksPanel(): React.JSX.Element {
         linkedGiteaPR,
         staleWhileRevalidate: true
       })
-      if (activeWorktreeId && !isGitLabReviewContext) {
+      // Why: the gh-based PR refresh coordinator is GitHub-only. Running it for
+      // Bitbucket/Azure/Gitea produced a spurious `gh_unavailable` hard error that
+      // hid a valid composer; those providers refresh via fetchHostedReviewForBranch.
+      if (activeWorktreeId && isGitHubReviewContext) {
         const refreshRequest = resolveChecksPanelPRRefreshRequest({
           cachedHasPR: prCachedHasPR,
           cachedFetchedAt: prFetchedAt ?? null,
@@ -1272,7 +1434,7 @@ export default function ChecksPanel(): React.JSX.Element {
     fallbackGitHubPRNumber,
     fetchHostedReviewForBranch,
     isFolder,
-    isGitLabReviewContext,
+    isGitHubReviewContext,
     isPanelVisible,
     activeWorktree?.head,
     linkedAzureDevOpsPR,
@@ -1406,6 +1568,9 @@ export default function ChecksPanel(): React.JSX.Element {
               branch: status.branch ?? (status.head ? null : undefined)
             }
           })
+          // A fresh probe succeeded, so this context is no longer in the failed
+          // "could not check branch status" state.
+          setGitStatusProbeErrorContextKey((key) => (key === requestContextKey ? null : key))
         }
       })
       .catch((error) => {
@@ -1416,6 +1581,13 @@ export default function ChecksPanel(): React.JSX.Element {
           setGitStatusSnapshot((snapshot) =>
             shouldClearChecksPanelGitStatusSnapshot(snapshot, requestContextKey) ? null : snapshot
           )
+          // Mark the probe as failed so the empty state can show "Could not check
+          // branch status" instead of an indefinite "Checking branch status".
+          if (
+            shouldCommitChecksPanelGitStatusSnapshot(panelContextKeyRef.current, requestContextKey)
+          ) {
+            setGitStatusProbeErrorContextKey(requestContextKey)
+          }
           gitStatusSnapshotRetryTimerRef.current = setTimeout(() => {
             gitStatusSnapshotRetryTimerRef.current = null
             if (
@@ -1478,6 +1650,19 @@ export default function ChecksPanel(): React.JSX.Element {
       return
     }
     let stale = false
+    const requestContextKey = panelContextKey
+    const requestStartedAt = Date.now()
+    const requestGitFingerprint = buildChecksPanelEligibilityGitFingerprint({
+      headOid: eligibilityHeadOidRef.current,
+      hasUncommittedChanges,
+      hasUpstream: remoteStatus?.hasUpstream,
+      ahead: remoteStatus?.ahead,
+      behind: remoteStatus?.behind,
+      base: repo.worktreeBaseRef ?? null,
+      runtimeEnvironmentId,
+      repoConnectionId,
+      localExecutionScope
+    })
     void getHostedReviewCreationEligibility({
       repoPath: repo.path,
       repoId: repo.id,
@@ -1499,22 +1684,31 @@ export default function ChecksPanel(): React.JSX.Element {
         if (!stale) {
           setHostedReviewCreationSnapshot({
             requestKey: hostedReviewCreationRequestKey,
+            contextKey: requestContextKey,
             repoId: repo.id,
             worktreeId: activeWorktreeId,
             branch,
+            requestStartedAt,
+            completedAt: Date.now(),
+            gitFingerprint: requestGitFingerprint,
             data: result
           })
         }
       })
       .catch(() => {
-        if (!stale) {
-          setHostedReviewCreationSnapshot(null)
-        }
+        // Why: a transient GitHub outage makes the existing-review lookup inside
+        // eligibility rethrow. Do NOT tear down the last confirmed snapshot — a
+        // clean, already-confirmed composer must survive the outage. Confirmed
+        // readiness still gates it on context + git-fingerprint + freshness, so a
+        // stale snapshot can never open a never-confirmed Create.
       })
     return () => {
       stale = true
     }
   }, [
+    panelContextKey,
+    runtimeEnvironmentId,
+    repoConnectionId,
     activeWorktreeId,
     activeWorktreePath,
     branch,
@@ -1522,6 +1716,8 @@ export default function ChecksPanel(): React.JSX.Element {
     gitStatusReadyForPanelContext,
     hasUncommittedChanges,
     hostedReviewCreationRequestKey,
+    eligibilityRefreshNonce,
+    localExecutionScope,
     isFolder,
     isPanelVisible,
     linkedPR,
@@ -2205,6 +2401,10 @@ export default function ChecksPanel(): React.JSX.Element {
       if (isCurrentRequest()) {
         refreshInFlightRef.current = false
         setIsRefreshing(false)
+        // Why: force a fresh eligibility request whose start time is after any
+        // current hard-refresh error, so a resolved auth/permission failure can
+        // clear the sticky hard error even when Git state did not change.
+        setEligibilityRefreshNonce((value) => value + 1)
       }
     }
   }, [
@@ -3287,6 +3487,51 @@ export default function ChecksPanel(): React.JSX.Element {
     pushBranch
   ])
 
+  // Sync the branch with its upstream using the same runtime-scoped operation and
+  // push target as Source Control, so a `needs_sync` create blocker is actionable
+  // from the Checks panel instead of showing guidance with no button.
+  const handleSyncBranch = useCallback(async (): Promise<void> => {
+    if (!activeWorktreeId || !activeWorktree?.path || isSyncingBranch || isRemoteOperationActive) {
+      return
+    }
+    const connectionId = activeConnectionId ?? undefined
+    setIsSyncingBranch(true)
+    try {
+      await syncBranch(
+        activeWorktreeId,
+        activeWorktree.path,
+        connectionId,
+        activeWorktree.pushTarget,
+        {
+          runtimeTargetSettings: ownerSettings
+        }
+      )
+      await fetchUpstreamStatus(
+        activeWorktreeId,
+        activeWorktree.path,
+        connectionId,
+        activeWorktree.pushTarget,
+        { runtimeTargetSettings: ownerSettings }
+      )
+    } catch {
+      // Store remote actions already surface the sync failure toast.
+    } finally {
+      // Why: syncing changes ahead/behind, which the panel uses to choose between
+      // Sync, Create PR, and Push & Create PR.
+      setGitStatusRefreshNonce((value) => value + 1)
+      setIsSyncingBranch(false)
+    }
+  }, [
+    activeWorktree,
+    activeWorktreeId,
+    activeConnectionId,
+    fetchUpstreamStatus,
+    isSyncingBranch,
+    isRemoteOperationActive,
+    ownerSettings,
+    syncBranch
+  ])
+
   const handlePullRequestCreated = useCallback(
     async (result: {
       provider: HostedReviewProvider
@@ -3605,18 +3850,31 @@ export default function ChecksPanel(): React.JSX.Element {
           hasUpstream: publishActionRemoteStatus?.hasUpstream,
           hasCurrentBranch: Boolean(branch)
         }))
-    // GitLab/other providers have no typed GitHub refresh state; only feed the
-    // GitHub refresh classification into the selector for GitHub contexts.
-    const emptyRefreshInput =
-      emptyReviewIsGitLab || !prRefreshState
-        ? undefined
-        : {
-            status: prRefreshState.status,
-            errorType: prRefreshState.errorType,
-            skippedReason: prRefreshState.skippedReason,
-            nextAutoRetryAt: prRefreshState.nextAutoRetryAt,
-            retryDisabledUntil: prRefreshState.retryDisabledUntil
-          }
+    // Non-GitHub providers (GitLab/Bitbucket/Azure/Gitea) have no typed GitHub
+    // refresh state; only feed the GitHub refresh classification into the selector
+    // for GitHub contexts. When a hard error is still active (sticky across
+    // auto-retries), surface it as the refresh state so the hard-error card and
+    // composer suppression persist even while a queued/in-flight retry is
+    // temporarily the live status.
+    const emptyRefreshInput = !isGitHubReviewContext
+      ? undefined
+      : checksPanelHasHardRefreshError && hardRefreshError
+        ? { status: 'error' as const, errorType: hardRefreshError.errorType }
+        : prRefreshState
+          ? {
+              status: prRefreshState.status,
+              errorType: prRefreshState.errorType,
+              skippedReason: prRefreshState.skippedReason,
+              nextAutoRetryAt: prRefreshState.nextAutoRetryAt,
+              retryDisabledUntil: prRefreshState.retryDisabledUntil
+            }
+          : undefined
+    const emptyGitStatusPhase: 'loading' | 'ready' | 'error' =
+      gitStatusInputs.hasUncommittedChanges !== undefined
+        ? 'ready'
+        : gitStatusProbeErrorContextKey === panelContextKey
+          ? 'error'
+          : 'loading'
     const reviewState = getChecksPanelReviewState({
       operationLabel,
       reviewLabel: emptyReviewLabel,
@@ -3626,11 +3884,12 @@ export default function ChecksPanel(): React.JSX.Element {
       reviewLookup: checksPanelReviewLookup,
       openReviewUrl: checksPanelReviewLookupResult.openReviewUrl,
       eligibilityBlockedReason: hostedReviewCreation?.blockedReason,
-      // Keep selector composer mode aligned with the actual composer gate.
-      confirmedReadiness: createComposerOpen,
-      confirmedNeedsPush: canPushCreate,
+      // Confirmed readiness (not the live create gate) drives composer mode so
+      // the selector matches the preserved-composer semantics.
+      confirmedReadiness: confirmedReadiness.confirmed,
+      confirmedNeedsPush: confirmedReadiness.needsPush,
       refresh: emptyRefreshInput,
-      gitStatusPhase: gitStatusInputs.hasUncommittedChanges !== undefined ? 'ready' : 'loading',
+      gitStatusPhase: emptyGitStatusPhase,
       hasUpstream: publishActionRemoteStatus?.hasUpstream,
       hasCurrentBranch: Boolean(branch)
     })
@@ -3646,8 +3905,24 @@ export default function ChecksPanel(): React.JSX.Element {
     const reviewRecoveryRetryDisabled =
       reviewState.retryDisabledUntil !== undefined && Date.now() < reviewState.retryDisabledUntil
     const reviewRecoveryLabelIsRefresh = reviewState.recovery.includes('refresh')
+    // Only offer Retry/Refresh when the selector's recovery set includes it;
+    // states like git-status loading, bare, or archived expose no recovery.
+    const reviewShowRetryOrRefresh =
+      reviewState.recovery.includes('retry') || reviewRecoveryLabelIsRefresh
     const reviewShowOpenReview =
       reviewState.recovery.includes('open_review') && Boolean(reviewState.openReviewUrl)
+    // The selector is the authority for the Sync workflow action; a `needs_sync`
+    // create blocker must expose Sync Branch, not just guidance copy.
+    const reviewShowSyncBranch = reviewState.workflowAction === 'sync_branch'
+    // The action row must render whenever any action is available — recovery
+    // actions (Retry/Refresh/Open Review) are shown independently of the composer
+    // so a preserved confirmed composer still exposes a working Retry during a
+    // transient failure.
+    const reviewShowActionRow =
+      canPublishBranch ||
+      reviewShowSyncBranch ||
+      (reviewShowOpenReview && Boolean(reviewState.openReviewUrl)) ||
+      reviewShowRetryOrRefresh
     return (
       <div className="px-4 py-6">
         {detachedHeadDisplay && (
@@ -3710,7 +3985,7 @@ export default function ChecksPanel(): React.JSX.Element {
             />
           </div>
         ) : null}
-        {!operationInProgress && (!createComposerOpen || canPublishBranch) && (
+        {!operationInProgress && reviewShowActionRow && (
           <div className="mt-3 flex flex-wrap gap-2">
             {canPublishBranch && (
               <Button
@@ -3723,6 +3998,20 @@ export default function ChecksPanel(): React.JSX.Element {
                   : translate(
                       'auto.components.right.sidebar.ChecksPanel.6633c7a1fb',
                       'Publish Branch'
+                    )}
+              </Button>
+            )}
+            {reviewShowSyncBranch && (
+              <Button
+                size="xs"
+                disabled={isSyncingBranch || isRemoteOperationActive}
+                onClick={() => void handleSyncBranch()}
+              >
+                {isSyncingBranch
+                  ? translate('auto.components.right.sidebar.ChecksPanel.sync.pending', 'Syncing…')
+                  : translate(
+                      'auto.components.right.sidebar.ChecksPanel.sync.branch',
+                      'Sync Branch'
                     )}
               </Button>
             )}
@@ -3746,7 +4035,7 @@ export default function ChecksPanel(): React.JSX.Element {
                 )}
               </Button>
             ) : null}
-            {!createComposerOpen ? (
+            {reviewShowRetryOrRefresh ? (
               <Button
                 size="xs"
                 variant="outline"

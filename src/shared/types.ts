@@ -1202,7 +1202,7 @@ export type PRRefreshOutcome =
       errorType: PRRefreshErrorType
       message: string
       fetchedAt: number
-      // Unified retry schedule (see docs/design/pr-panel-refresh-guidance.md).
+      // Unified retry schedule (see docs/reference/pr-panel-refresh-guidance.md).
       // `nextAutoRetryAt`: earliest time main expects to auto-retry this key.
       // `retryDisabledUntil`: earliest time a manual Retry / refreshPRNow is
       // accepted (rate-limit gates only, never ordinary network/auth backoff).

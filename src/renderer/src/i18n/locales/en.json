@@ -9148,6 +9148,10 @@
               "auto_retry": "Orca will retry at {{time}}.",
               "open_review": "Open Review",
               "retry": "Retry"
+            },
+            "sync": {
+              "pending": "Syncing…",
+              "branch": "Sync Branch"
             }
           },
           "CreatePullRequestDialog": {

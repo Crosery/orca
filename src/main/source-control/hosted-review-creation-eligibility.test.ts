@@ -115,7 +115,7 @@ vi.mock('./hosted-review', () => ({
   getHostedReviewForBranch: getHostedReviewForBranchMock
 }))
 
-import { getHostedReviewCreationEligibility } from './hosted-review-creation'
+import { createHostedReview, getHostedReviewCreationEligibility } from './hosted-review-creation'
 
 function resetMocks(): void {
   for (const mock of [
@@ -272,6 +272,54 @@ describe('getHostedReviewCreationEligibility', () => {
         behind: 0
       })
     ).resolves.toMatchObject({ blockedReason: 'no_upstream', reviewLookupOutcome: 'unavailable' })
+  })
+
+  it('never marks a clean, in-sync branch creatable when the review lookup fails', async () => {
+    // A failed existing-review lookup leaves review existence unproven, so the
+    // happy path must not claim canCreate — that would offer Create against a
+    // branch that might already have a review (finding 4).
+    getHostedReviewForBranchMock.mockRejectedValue(new Error('gh: could not connect to github.com'))
+    await expect(
+      getHostedReviewCreationEligibility({
+        repoPath: '/repo',
+        branch: 'feature/x',
+        base: 'origin/main',
+        hasUncommittedChanges: false,
+        hasUpstream: true,
+        ahead: 0,
+        behind: 0
+      })
+    ).resolves.toMatchObject({
+      canCreate: false,
+      blockedReason: null,
+      reviewLookupOutcome: 'unavailable'
+    })
+  })
+
+  it('refuses to create when the existing-review lookup is unavailable (finding 5)', async () => {
+    getHostedReviewForBranchMock.mockRejectedValue(new Error('glab: connection refused'))
+    getUpstreamStatusMock.mockResolvedValue({ hasUpstream: true, ahead: 0, behind: 0 })
+    gitExecFileAsyncMock.mockImplementation(async (args: string[]) => {
+      if (args[0] === 'rev-parse') {
+        return { stdout: 'feature/x\n', stderr: '' }
+      }
+      if (args[0] === 'status') {
+        return { stdout: '', stderr: '' }
+      }
+      // symbolic-ref / for-each-ref resolve the base on the remote.
+      return { stdout: 'refs/remotes/origin/main\n', stderr: '' }
+    })
+
+    const result = await createHostedReview('/repo', {
+      provider: 'github',
+      base: 'main',
+      head: 'feature/x',
+      title: 'Add feature'
+    })
+
+    expect(result).toMatchObject({ ok: false, code: 'validation' })
+    // The provider create API must never run on an inconclusive lookup.
+    expect(createGitHubPullRequestMock).not.toHaveBeenCalled()
   })
 
   // Stacked-worktree base resolution (Change 1/2). `stackedArgs` defaults to a

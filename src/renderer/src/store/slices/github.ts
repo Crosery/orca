@@ -14,6 +14,7 @@ import type {
   GitHubPRRefreshReason,
   GitHubPRRefreshSkippedReason,
   PRRefreshErrorType,
+  PRRefreshOutcome,
   GitHubCommentResult,
   IssueInfo,
   PRCheckDetail,
@@ -665,7 +666,7 @@ export type PRRefreshState = {
   errorType?: PRRefreshErrorType
   // Skip cause on `skipped` states; kept distinct from the trigger `reason`.
   skippedReason?: GitHubPRRefreshSkippedReason
-  // Unified retry schedule (see docs/design/pr-panel-refresh-guidance.md).
+  // Unified retry schedule (see docs/reference/pr-panel-refresh-guidance.md).
   // `nextAutoRetryAt`: earliest time main expects to auto-retry — drives the
   // "Orca will retry at {time}" sentence. `retryDisabledUntil`: earliest time a
   // manual Retry is accepted, set only for rate-limit gates.
@@ -2157,6 +2158,24 @@ export type GitHubSlice = {
   patchProjectRowContent: (cacheKey: string, rowId: string, patch: ProjectRowContentPatch) => void
 }
 
+/**
+ * Normalizes the `github.prForBranch` runtime RPC result into a
+ * {@link PRRefreshOutcome}. Current hosts return the full outcome (with a
+ * `kind`), so a runtime `upstream-error` is preserved instead of collapsing to a
+ * false accepted "no PR". A legacy host that still returns `PRInfo | null` is
+ * mapped to `found` / `no-pr` to preserve backward behavior on that host only.
+ */
+function normalizeRuntimePRForBranchOutcome(
+  result: PRRefreshOutcome | PRInfo | null
+): PRRefreshOutcome {
+  if (result && typeof result === 'object' && 'kind' in result) {
+    return result
+  }
+  return result
+    ? { kind: 'found', pr: result, fetchedAt: Date.now() }
+    : { kind: 'no-pr', fetchedAt: Date.now() }
+}
+
 export const createGitHubSlice: StateCreator<AppState, [], [], GitHubSlice> = (set, get) => ({
   prCache: {},
   issueCache: {},
@@ -3172,7 +3191,7 @@ export const createGitHubSlice: StateCreator<AppState, [], [], GitHubSlice> = (s
           : null
         const requestHeadOid = candidateWorktree?.head ?? null
         const outcome = runtimeRepo
-          ? await callRuntimeRpc<PRInfo | null>(
+          ? await callRuntimeRpc<PRRefreshOutcome | PRInfo | null>(
               runtimeRepo.target,
               'github.prForBranch',
               {
@@ -3185,11 +3204,7 @@ export const createGitHubSlice: StateCreator<AppState, [], [], GitHubSlice> = (s
                   : {})
               },
               { timeoutMs: 30_000 }
-            ).then((pr) =>
-              pr
-                ? ({ kind: 'found', pr, fetchedAt: Date.now() } as const)
-                : ({ kind: 'no-pr', fetchedAt: Date.now() } as const)
-            )
+            ).then((result) => normalizeRuntimePRForBranchOutcome(result))
           : await (async () => {
               const candidate: GitHubPRRefreshCandidate = {
                 repoId: repoId ?? '',
@@ -3233,6 +3248,27 @@ export const createGitHubSlice: StateCreator<AppState, [], [], GitHubSlice> = (s
         const pr: PRInfo | null =
           outcome.kind === 'found' ? outcome.pr : outcome.kind === 'no-pr' ? null : null
         if (outcome.kind === 'upstream-error') {
+          // Why: the runtime RPC path does not flow through the coordinator
+          // broadcast that populates prRefreshStates on native execution, so a
+          // runtime/SSH gh failure would otherwise show generic "checking" copy.
+          // Record the classified error + schedule here so the Checks panel shows
+          // the same classified failure copy as native (design criterion 2).
+          if (runtimeRepo && prRequestGenerations.get(cacheKey) === generation) {
+            set((s) => {
+              const nextStates = { ...s.prRefreshStates }
+              delete nextStates[cacheKey]
+              nextStates[cacheKey] = {
+                status: 'error',
+                reason: 'swr',
+                updatedAt: Date.now(),
+                message: outcome.message,
+                errorType: outcome.errorType,
+                nextAutoRetryAt: outcome.nextAutoRetryAt,
+                retryDisabledUntil: outcome.retryDisabledUntil
+              }
+              return { prRefreshStates: nextStates }
+            })
+          }
           return cached?.data ?? null
         }
         if (prRequestGenerations.get(cacheKey) === generation) {

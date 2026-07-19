@@ -50,7 +50,6 @@ import {
   execFileAsync,
   ghExecFileAsync,
   gitExecFileAsync,
-  extractExecError,
   acquire,
   release,
   getOwnerRepo,
@@ -66,6 +65,9 @@ import {
   type LocalGitExecOptions,
   type OwnerRepo
 } from './gh-utils'
+// Import the pure error-parsing helpers from the lightweight module, not
+// `./gh-utils`, so tests that mock gh-utils still resolve the real functions.
+import { extractExecError, parseRetryAfterMs } from '../git/exec-error'
 import {
   isCommitPartOfMergedPR,
   type MergedPRCommitMembership
@@ -188,12 +190,24 @@ function prRefreshUpstreamError(
   err: unknown
 ): Extract<PRRefreshOutcome, { kind: 'upstream-error' }> {
   const errorType = classifyPRRefreshError(err)
-  return {
+  const outcome: Extract<PRRefreshOutcome, { kind: 'upstream-error' }> = {
     kind: 'upstream-error',
     errorType,
     message: safePRRefreshErrorMessage(errorType),
     fetchedAt: Date.now()
   }
+  // Why: a rate limit that carries a Retry-After is a real cooldown — surface it
+  // as the retry schedule so the renderer disables manual Retry until the reset
+  // and shows a truthful auto-retry time, instead of retrying into another 429.
+  if (errorType === 'rate_limited') {
+    const retryAfterMs = parseRetryAfterMs(extractExecError(err).stderr)
+    if (retryAfterMs !== null && retryAfterMs > 0) {
+      const retryAt = Date.now() + retryAfterMs
+      outcome.nextAutoRetryAt = retryAt
+      outcome.retryDisabledUntil = retryAt
+    }
+  }
+  return outcome
 }
 
 function isNoPullRequestError(err: unknown): boolean {

@@ -189,7 +189,8 @@ describe('source-control Create PR intent flow helpers', () => {
           review: null,
           canCreate: false,
           blockedReason: 'no_upstream',
-          nextAction: 'publish'
+          nextAction: 'publish',
+          reviewLookupOutcome: 'not_found'
         }
       })
     ).toBe('publish')
@@ -203,7 +204,8 @@ describe('source-control Create PR intent flow helpers', () => {
           review: null,
           canCreate: false,
           blockedReason: 'needs_push',
-          nextAction: 'push'
+          nextAction: 'push',
+          reviewLookupOutcome: 'not_found'
         }
       })
     ).toBe('push')
@@ -223,7 +225,8 @@ describe('source-control Create PR intent flow helpers', () => {
           review: null,
           canCreate: false,
           blockedReason: 'needs_sync',
-          nextAction: 'sync'
+          nextAction: 'sync',
+          reviewLookupOutcome: 'not_found'
         }
       })
     ).toBe('force_push')
@@ -239,7 +242,8 @@ describe('source-control Create PR intent flow helpers', () => {
           review: null,
           canCreate: false,
           blockedReason: 'needs_sync',
-          nextAction: 'sync'
+          nextAction: 'sync',
+          reviewLookupOutcome: 'not_found'
         }
       })
     ).toBe('blocked')
@@ -254,7 +258,8 @@ describe('source-control Create PR intent flow helpers', () => {
           review: null,
           canCreate: false,
           blockedReason: 'no_upstream',
-          nextAction: 'publish'
+          nextAction: 'publish',
+          reviewLookupOutcome: 'not_found'
         }
       })
     ).toBe('blocked')

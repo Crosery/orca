@@ -5,13 +5,10 @@ import type { ChecksPanelReviewLookup } from './checks-panel-review-lookup-autho
 /**
  * Composer visibility the panel should render. Phase 1 never *opens* a new
  * composer from a refresh failure — `confirmed_open` / `needs_push_open` mean an
- * already-confirmed composer stays open. `draft_preserve_disabled` is Phase 2.
+ * already-confirmed composer stays open. (Phase 2's disabled draft-preserve mode
+ * is intentionally absent until that phase ships.)
  */
-export type ChecksPanelComposerMode =
-  | 'hidden'
-  | 'confirmed_open'
-  | 'needs_push_open'
-  | 'draft_preserve_disabled'
+export type ChecksPanelComposerMode = 'hidden' | 'confirmed_open' | 'needs_push_open'
 
 export type ChecksPanelWorkflowAction =
   | 'create'

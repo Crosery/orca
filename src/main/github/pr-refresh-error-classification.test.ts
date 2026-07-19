@@ -66,6 +66,63 @@ describe('classifyPRRefreshError', () => {
   it('falls back to unknown', () => {
     expect(classifyPRRefreshError(new Error('something unexpected happened'))).toBe('unknown')
   })
+
+  it('does not classify a message that merely contains "author" as auth', () => {
+    for (const message of [
+      'PR author octocat has no write access to the fork',
+      'authored 3 commits, none pushed',
+      'unexpected failure from author service'
+    ]) {
+      expect(classifyPRRefreshError(new Error(message))).toBe('unknown')
+    }
+  })
+
+  it('does not classify a repository name containing "network" as a network failure', () => {
+    // A repo/branch called "network-*" is not a connectivity failure; without a
+    // structured code or a real connectivity phrase this must stay unknown.
+    expect(classifyPRRefreshError(new Error('operation failed for repo acme/network-tools'))).toBe(
+      'unknown'
+    )
+  })
+
+  it('classifies a 404 repository error even when the message mentions network', () => {
+    // 404 ranks before the network branch so the repo error is not misread.
+    expect(
+      classifyPRRefreshError(
+        new Error('Could not resolve to a Repository named acme/network-proxy (HTTP 404)')
+      )
+    ).toBe('repo_unavailable')
+  })
+
+  it('classifies a 401 as auth', () => {
+    expect(classifyPRRefreshError(new Error('HTTP 401 Unauthorized'))).toBe('auth')
+  })
+
+  it('classifies from the real runner error shape where the signal is on .stderr', () => {
+    // Why: the runner rejects with a generic message and puts the gh diagnostic
+    // on `.stderr` (string or Buffer). Reading `.message` alone would misclassify
+    // these hard errors as `unknown` and treat them as transient.
+    const permission = Object.assign(new Error('gh exited with 1.'), {
+      stderr: 'HTTP 403: Resource not accessible by integration'
+    })
+    expect(classifyPRRefreshError(permission)).toBe('permission')
+
+    const repo = Object.assign(new Error('gh exited with 1.'), {
+      stderr: Buffer.from('HTTP 404: Not Found')
+    })
+    expect(classifyPRRefreshError(repo)).toBe('repo_unavailable')
+
+    const secondary = Object.assign(new Error('gh exited with 1.'), {
+      stderr: 'You have exceeded a secondary rate limit'
+    })
+    expect(classifyPRRefreshError(secondary)).toBe('rate_limited')
+
+    const auth = Object.assign(new Error('gh exited with 1.'), {
+      stdout: '',
+      stderr: 'gh auth login required: bad credentials'
+    })
+    expect(classifyPRRefreshError(auth)).toBe('auth')
+  })
 })
 
 describe('safePRRefreshErrorMessage', () => {

@@ -49,15 +49,27 @@ export type ChecksPanelReviewLookupResult = {
 }
 
 /**
- * Returns the URL only when it is a plain http(s) link, so a credential-bearing
- * or non-web value never reaches an Open Review affordance.
+ * Returns the URL only when it is a plain http(s) link with no embedded
+ * credentials, so a credential-bearing or non-web value never reaches an Open
+ * Review affordance (and never lands in browser history / shell logs).
  */
 export function normalizeTrustedReviewUrl(url: string | null | undefined): string | null {
   if (!url) {
     return null
   }
   const trimmed = url.trim()
-  if (!/^https?:\/\//i.test(trimmed)) {
+  let parsed: URL
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    return null
+  }
+  // Reject non-web schemes and any userinfo (`user:token@host`) — a prefix regex
+  // alone would forward embedded credentials to the browser/shell.
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return null
+  }
+  if (parsed.username !== '' || parsed.password !== '') {
     return null
   }
   return trimmed

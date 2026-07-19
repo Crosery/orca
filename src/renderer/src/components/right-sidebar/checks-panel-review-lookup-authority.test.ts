@@ -112,6 +112,12 @@ describe('normalizeTrustedReviewUrl', () => {
     expect(normalizeTrustedReviewUrl('')).toBe(null)
     expect(normalizeTrustedReviewUrl('ftp://x.test')).toBe(null)
     expect(normalizeTrustedReviewUrl('file:///etc/passwd')).toBe(null)
+    expect(normalizeTrustedReviewUrl('not a url')).toBe(null)
+  })
+
+  it('rejects credential-bearing URLs so tokens never reach the browser/shell', () => {
+    expect(normalizeTrustedReviewUrl('https://user:token@git.test/repo/pull/1')).toBe(null)
+    expect(normalizeTrustedReviewUrl('https://user@git.test/repo/pull/1')).toBe(null)
   })
 })
 

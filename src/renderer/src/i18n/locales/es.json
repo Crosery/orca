@@ -9145,9 +9145,13 @@
             "495b2f8c4b": "Agente iniciado, pero no se pudieron marcar los comentarios seleccionados como resueltos.",
             "3c3ad3a1d2": "Agente iniciado. No se puede marcar ningún comentario seleccionado como resuelto en el host.",
             "review": {
-              "auto_retry": "Orca will retry at {{time}}.",
-              "open_review": "Open Review",
-              "retry": "Retry"
+              "auto_retry": "Orca reintentará a las {{time}}.",
+              "open_review": "Abrir revisión",
+              "retry": "Reintentar"
+            },
+            "sync": {
+              "pending": "Syncing…",
+              "branch": "Sync Branch"
             }
           },
           "CreatePullRequestDialog": {
@@ -9762,132 +9766,132 @@
               },
               "review": {
                 "detail": {
-                  "positive": "Orca also has saved {{reviewLabel}} information that it could not verify.",
-                  "rate_limited": "Orca also could not check {{reviewLabel}} status because {{provider}} is temporarily limiting requests.",
-                  "network": "Orca also could not check {{reviewLabel}} status because this environment could not reach {{provider}}.",
-                  "untyped": "Orca also could not confirm whether this branch already has a {{reviewLabel}}."
+                  "positive": "Orca también tiene información de {{reviewLabel}} guardada que no pudo verificar.",
+                  "rate_limited": "Orca también no pudo verificar el estado de {{reviewLabel}} porque {{provider}} está limitando temporalmente las solicitudes.",
+                  "network": "Orca también no pudo verificar el estado de {{reviewLabel}} porque este entorno no pudo conectar con {{provider}}.",
+                  "untyped": "Orca también no pudo confirmar si esta rama ya tiene un {{reviewLabel}}."
                 },
                 "positive": {
-                  "title": "{{reviewLabelCap}} details unavailable",
-                  "body": "Orca has saved {{reviewLabel}} information for this branch but could not confirm its current status."
+                  "title": "Detalles de {{reviewLabelCap}} no disponibles",
+                  "body": "Orca ha guardado información de {{reviewLabel}} para esta rama pero no pudo confirmar su estado actual."
                 },
                 "no_review": {
-                  "title": "No {{reviewLabel}} found",
-                  "body": "Create a {{reviewLabel}} to start checks and review."
+                  "title": "No se encontró ningún {{reviewLabel}}",
+                  "body": "Crea un {{reviewLabel}} para iniciar las verificaciones y la revisión."
                 },
                 "active": {
-                  "title": "Checking {{reviewLabel}} status",
-                  "body": "Orca is checking {{provider}} for a {{reviewLabel}} on this branch."
+                  "title": "Verificando estado de {{reviewLabel}}",
+                  "body": "Orca está verificando {{provider}} para un {{reviewLabel}} en esta rama."
                 },
                 "git_loading": {
-                  "title": "Checking branch status",
-                  "body": "Orca is checking this branch before showing create or publish actions."
+                  "title": "Verificando estado de la rama",
+                  "body": "Orca está verificando esta rama antes de mostrar las acciones de creación o publicación."
                 },
                 "git_error": {
-                  "title": "Could not check branch status",
-                  "body": "Orca could not confirm this branch's upstream from this environment. Retry before publishing or creating a {{reviewLabel}}."
+                  "title": "No se pudo verificar el estado de la rama",
+                  "body": "Orca no pudo confirmar el upstream de esta rama desde este entorno. Reintenta antes de publicar o crear un {{reviewLabel}}."
                 },
                 "unknown": {
-                  "title": "{{reviewLabelCap}} status unavailable",
-                  "body": "Orca has not confirmed the {{reviewLabel}} status for this branch. Retry to check again."
+                  "title": "Estado de {{reviewLabelCap}} no disponible",
+                  "body": "Orca no ha confirmado el estado de {{reviewLabel}} para esta rama. Reintenta para verificar de nuevo."
                 },
                 "paused": {
-                  "title": "{{provider}} refresh paused",
-                  "body": "{{provider}} is temporarily limiting requests. This can happen even when the displayed API quota is not exhausted."
+                  "title": "Actualización de {{provider}} pausada",
+                  "body": "{{provider}} está limitando temporalmente las solicitudes. Esto puede ocurrir incluso cuando la cuota de API mostrada no está agotada."
                 },
                 "network": {
-                  "title": "Could not reach {{provider}}",
-                  "body": "This environment could not reach {{provider}}. Check its connection, then retry."
+                  "title": "No se pudo conectar con {{provider}}",
+                  "body": "Este entorno no pudo conectar con {{provider}}. Verifica su conexión y reintenta."
                 },
                 "unknown_error": {
-                  "title": "Could not check {{reviewLabel}} status",
-                  "body": "The lookup failed, so Orca could not confirm whether this branch already has a {{reviewLabel}}."
+                  "title": "No se pudo verificar el estado de {{reviewLabel}}",
+                  "body": "La búsqueda falló, por lo que Orca no pudo confirmar si esta rama ya tiene un {{reviewLabel}}."
                 },
                 "untyped": {
-                  "title": "{{reviewLabelCap}} status unavailable",
-                  "body": "Orca could not confirm whether this branch already has a {{reviewLabel}}. Retry to check again."
+                  "title": "Estado de {{reviewLabelCap}} no disponible",
+                  "body": "Orca no pudo confirmar si esta rama ya tiene un {{reviewLabel}}. Reintenta para verificar de nuevo."
                 },
                 "auth": {
-                  "title": "{{provider}} authentication failed",
-                  "body": "{{provider}} could not authenticate the credentials available in this environment. Check the {{provider}} login or environment token, then retry."
+                  "title": "Autenticación de {{provider}} fallida",
+                  "body": "{{provider}} no pudo autenticar las credenciales disponibles en este entorno. Verifica el inicio de sesión de {{provider}} o el token del entorno y reintenta."
                 },
                 "permission": {
-                  "title": "{{provider}} access denied",
-                  "body": "The current {{provider}} credentials cannot read this repository's {{reviewLabel}}s. Check the account, token scopes, and repository access, then retry."
+                  "title": "Acceso denegado por {{provider}}",
+                  "body": "Las credenciales actuales de {{provider}} no pueden leer los {{reviewLabel}} de este repositorio. Verifica la cuenta, los alcances del token y el acceso al repositorio, luego reintenta."
                 },
                 "repo": {
-                  "title": "{{provider}} repository unavailable",
-                  "body": "{{provider}} could not resolve or access the repository for the current remote and account. Check the remote and repository access, then retry."
+                  "title": "Repositorio de {{provider}} no disponible",
+                  "body": "{{provider}} no pudo resolver o acceder al repositorio del remote y cuenta actuales. Verifica el remote y el acceso al repositorio, luego reintenta."
                 },
                 "cli": {
-                  "title": "{{provider}} CLI unavailable",
-                  "body": "Orca could not run {{provider}} CLI in this environment. Set it up here, then retry."
+                  "title": "CLI de {{provider}} no disponible",
+                  "body": "Orca no pudo ejecutar la CLI de {{provider}} en este entorno. Configúrala aquí y reintenta."
                 },
                 "skipped": {
                   "disconnected": {
-                    "title": "Host disconnected",
-                    "body": "This repository's execution host is disconnected, so Orca cannot refresh {{reviewLabel}} status."
+                    "title": "Host desconectado",
+                    "body": "El host de ejecución de este repositorio está desconectado, por lo que Orca no puede actualizar el estado de {{reviewLabel}}."
                   },
                   "bare": {
-                    "title": "Bare repository",
-                    "body": "This repository is bare, so {{reviewLabel}} status is not available here."
+                    "title": "Repositorio bare",
+                    "body": "Este repositorio es bare, por lo que el estado de {{reviewLabel}} no está disponible aquí."
                   },
                   "archived": {
-                    "title": "Repository archived",
-                    "body": "This repository is archived, so Orca is not refreshing {{reviewLabel}} status."
+                    "title": "Repositorio archivado",
+                    "body": "Este repositorio está archivado, por lo que Orca no está actualizando el estado de {{reviewLabel}}."
                   },
                   "not_git": {
-                    "title": "Not a Git repository",
-                    "body": "Orca could not treat this folder as a Git repository for {{reviewLabel}} status."
+                    "title": "No es un repositorio Git",
+                    "body": "Orca no pudo tratar esta carpeta como un repositorio Git para el estado de {{reviewLabel}}."
                   },
                   "remote": {
-                    "title": "Remote-only context",
-                    "body": "Orca could not refresh {{reviewLabel}} status for this remote context. Retry after the host is available."
+                    "title": "Contexto solo remoto",
+                    "body": "Orca no pudo actualizar el estado de {{reviewLabel}} para este contexto remoto. Reintenta cuando el host esté disponible."
                   }
                 },
                 "no_upstream": {
-                  "title": "No upstream configured",
-                  "body": "Publish this branch to set its upstream before creating a {{reviewLabel}}."
+                  "title": "Sin upstream configurado",
+                  "body": "Publica esta rama para configurar su upstream antes de crear un {{reviewLabel}}."
                 },
                 "needs_sync": {
-                  "title": "Branch needs to sync",
-                  "body": "Sync this branch with its upstream before creating a {{reviewLabel}}."
+                  "title": "La rama necesita sincronizarse",
+                  "body": "Sincroniza esta rama con su upstream antes de crear un {{reviewLabel}}."
                 },
                 "auth_required": {
-                  "title": "Connect {{provider}}",
-                  "body": "{{provider}} must be connected in this environment before Orca can create a {{reviewLabel}}."
+                  "title": "Conecta {{provider}}",
+                  "body": "{{provider}} debe estar conectado en este entorno antes de que Orca pueda crear un {{reviewLabel}}."
                 },
                 "needs_push": {
-                  "title": "Branch has unpushed commits",
-                  "body": "Push the latest commits before creating a {{reviewLabel}}."
+                  "title": "La rama tiene commits sin enviar",
+                  "body": "Envía los últimos commits antes de crear un {{reviewLabel}}."
                 },
                 "existing": {
-                  "title": "{{reviewLabelCap}} already exists",
-                  "body": "Orca found an existing {{reviewLabel}} for this branch."
+                  "title": "{{reviewLabelCap}} ya existe",
+                  "body": "Orca encontró un {{reviewLabel}} existente para esta rama."
                 },
                 "detached": {
-                  "title": "No current branch",
-                  "body": "Check out a branch before creating a {{reviewLabel}}."
+                  "title": "Sin rama actual",
+                  "body": "Selecciona una rama antes de crear un {{reviewLabel}}."
                 },
                 "dirty": {
-                  "title": "Commit changes first",
-                  "body": "Commit or stash your changes before creating a {{reviewLabel}}."
+                  "title": "Primero confirma los cambios",
+                  "body": "Confirma o guarda tus cambios antes de crear un {{reviewLabel}}."
                 },
                 "default_branch": {
-                  "title": "On the default branch",
-                  "body": "Switch to a feature branch before creating a {{reviewLabel}}."
+                  "title": "En la rama por defecto",
+                  "body": "Cambia a una rama de características antes de crear un {{reviewLabel}}."
                 },
                 "fork": {
-                  "title": "Fork head unsupported",
-                  "body": "Orca cannot create a {{reviewLabel}} from this fork head here."
+                  "title": "Fork head no soportado",
+                  "body": "Orca no puede crear un {{reviewLabel}} desde este fork head aquí."
                 },
                 "base_missing": {
-                  "title": "Base branch not on remote",
-                  "body": "This branch's base is not on the remote yet, so a {{reviewLabel}} cannot target it."
+                  "title": "La rama base no está en el remote",
+                  "body": "La base de esta rama aún no está en el remote, por lo que un {{reviewLabel}} no puede apuntar a ella."
                 },
                 "unsupported": {
-                  "title": "{{reviewLabelCap}} not supported here",
-                  "body": "This repository provider does not support creating a {{reviewLabel}} from Orca."
+                  "title": "{{reviewLabelCap}} no soportado aquí",
+                  "body": "Este proveedor de repositorio no soporta la creación de un {{reviewLabel}} desde Orca."
                 }
               }
             }
