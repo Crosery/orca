@@ -286,6 +286,7 @@ export function getDefaultSettings(homedir: string): GlobalSettings {
     openLinksInAppPreferencePrompted: false,
     openAgentTabsInChatByDefault: false,
     experimentalNativeChat: false,
+    nativeChatSessionOptions: {},
     openInApplications: [...DEFAULT_OPEN_IN_APPLICATIONS],
     rightSidebarOpenByDefault: true,
     showGitIgnoredFiles: true,
@@ -296,6 +297,7 @@ export function getDefaultSettings(homedir: string): GlobalSettings {
     showTasksButton: true,
     showAutomationsButton: true,
     showMobileButton: true,
+    showPinnedWorktreesInGroups: false,
     ctrlTabOrderMode: 'mru',
     // Why: switching worktrees and opening command surfaces from a focused
     // terminal is a core Orca workflow; users who prefer TUI ownership opt in.

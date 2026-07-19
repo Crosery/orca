@@ -64,6 +64,7 @@ import type {
   PtyRendererDeliveryStateReport
 } from '../shared/pty-renderer-delivery-health'
 import type { TerminalViewAttributes } from '../shared/terminal-view-attributes'
+import type { WriteTerminalRenderDesyncEvidenceArgs } from '../shared/terminal-render-desync-evidence'
 import type { PtyMainDeliveryDiagnostics } from '../shared/pty-delivery-diagnostics'
 import type {
   WarpThemeImportPreview,
@@ -72,6 +73,7 @@ import type {
 import type { GitHistoryOptions, GitHistoryResult } from '../shared/git-history'
 import type { ShellOpenLocalPathResult } from '../shared/shell-open-types'
 import type { SkillDiscoveryResult, SkillDiscoveryTarget } from '../shared/skills'
+import type { SkillFreshnessInventory } from '../shared/skill-freshness'
 import type {
   RuntimeBrowserDriverState,
   RuntimeMobileSessionTabMove,
@@ -144,6 +146,7 @@ import type {
   MigrationUnsupportedPtyEntry
 } from '../shared/agent-status-types'
 import type { AgentInterruptInferenceRequest } from '../shared/agent-interrupt-intent'
+import type { AgentQuestionAnsweredInferenceRequest } from '../shared/agent-question-answered-intent'
 import type { TerminalSideEffectBatch } from '../shared/terminal-side-effect-facts'
 import type {
   SpeechErrorEvent,
@@ -503,7 +506,9 @@ const api = {
     pickFloatingMarkdownDocument: (): Promise<MarkdownDocument | null> =>
       ipcRenderer.invoke('app:pickFloatingMarkdownDocument'),
     pickFloatingWorkspaceDirectory: (): Promise<string | null> =>
-      ipcRenderer.invoke('app:pickFloatingWorkspaceDirectory')
+      ipcRenderer.invoke('app:pickFloatingWorkspaceDirectory'),
+    writeTerminalRenderDesyncEvidence: (args: WriteTerminalRenderDesyncEvidenceArgs) =>
+      ipcRenderer.invoke('terminal:writeRenderDesyncEvidence', args)
   },
 
   orcaProfiles: {
@@ -869,7 +874,7 @@ const api = {
       isAlternateScreen?: boolean
       replay?: string
       sessionExpired?: boolean
-      coldRestore?: { scrollback: string; cwd: string }
+      coldRestore?: { scrollback: string; cwd: string; cols?: number; rows?: number }
       startupCwdFallback?: { kind: 'worktree'; cwd: string }
     }> => ipcRenderer.invoke('pty:spawn', opts),
 
@@ -2216,7 +2221,9 @@ const api = {
 
   skills: {
     discover: (target?: SkillDiscoveryTarget): Promise<SkillDiscoveryResult> =>
-      ipcRenderer.invoke('skills:discover', target)
+      ipcRenderer.invoke('skills:discover', target),
+    freshnessInventory: (): Promise<SkillFreshnessInventory> =>
+      ipcRenderer.invoke('skills:freshnessInventory')
   },
 
   pet: {
@@ -2235,7 +2242,7 @@ const api = {
       worktreeId: string
       sessionProfileId?: string | null
       webContentsId: number
-    }): Promise<void> => ipcRenderer.invoke('browser:registerGuest', args),
+    }): Promise<boolean> => ipcRenderer.invoke('browser:registerGuest', args),
 
     unregisterGuest: (args: { browserPageId: string }): Promise<void> =>
       ipcRenderer.invoke('browser:unregisterGuest', args),
@@ -2267,6 +2274,17 @@ const api = {
       ipcRenderer.on('browser:guest-load-failed', listener)
       return () => ipcRenderer.removeListener('browser:guest-load-failed', listener)
     },
+
+    onCertificateFailureChanged: (callback): (() => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        data: Parameters<typeof callback>[0]
+      ): void => callback(data)
+      ipcRenderer.on('browser:certificate-failure-changed', listener)
+      return () => ipcRenderer.removeListener('browser:certificate-failure-changed', listener)
+    },
+
+    proceedCertificate: (args) => ipcRenderer.invoke('browser:proceedCertificate', args),
 
     onPermissionDenied: (
       callback: (event: { browserPageId: string; permission: string; origin: string }) => void
@@ -2816,6 +2834,11 @@ const api = {
       connectionId: string
     }): Promise<{ canceled: true } | { canceled: false; destinationPath: string }> =>
       ipcRenderer.invoke('fs:downloadFile', args),
+    downloadFolder: (args: {
+      dirPath: string
+      connectionId: string
+    }): Promise<{ canceled: true } | { canceled: false; destinationPath: string }> =>
+      ipcRenderer.invoke('fs:downloadFolder', args),
     saveDownloadedFile: (args: {
       suggestedName: string
       content: string
@@ -4390,6 +4413,8 @@ const api = {
       ipcRenderer.invoke('agentStatus:getSnapshot'),
     inferInterrupt: (request: AgentInterruptInferenceRequest): Promise<boolean> =>
       ipcRenderer.invoke('agentStatus:inferInterrupt', request),
+    inferQuestionAnswered: (request: AgentQuestionAnsweredInferenceRequest): Promise<boolean> =>
+      ipcRenderer.invoke('agentStatus:inferQuestionAnswered', request),
     onMigrationUnsupported: (
       callback: (entry: MigrationUnsupportedPtyEntry) => void
     ): (() => void) => {

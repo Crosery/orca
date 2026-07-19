@@ -498,7 +498,7 @@ export class RuntimeFileCommands {
     worktreeSelector: string,
     relativePath: string
   ): Promise<RuntimeFileOpenResult> {
-    const { worktree } = await this.host.resolveRuntimeFileTarget(worktreeSelector)
+    const { worktree, connectionId } = await this.host.resolveRuntimeFileTarget(worktreeSelector)
     if (!isSafeMobileRelativePath(relativePath)) {
       throw new Error('invalid_relative_path')
     }
@@ -515,6 +515,9 @@ export class RuntimeFileCommands {
       return { worktree: worktree.id, relativePath, kind, opened: false }
     }
     const filePath = joinWorktreeRelativePath(worktree.path, relativePath)
+    // Why: CLI/agents treat opened:true as success. Stat first so missing paths
+    // fail the RPC instead of creating a ghost editor tab that only errors on read.
+    await this.assertMobileOpenTargetExists(filePath, connectionId)
     // Why: the service's internal runtimeId is not a registered runtime env selector
     // (those live in orca-environments.json). Passing it caused Unknown environment
     // errors on content load for CLI-initiated opens (via files.open from orca cli
@@ -523,6 +526,25 @@ export class RuntimeFileCommands {
     // allowing correct routing for local vs remote envs.
     this.host.openFile(worktree.id, filePath, relativePath, undefined)
     return { worktree: worktree.id, relativePath, kind, opened: true }
+  }
+
+  private async assertMobileOpenTargetExists(
+    filePath: string,
+    connectionId?: string
+  ): Promise<void> {
+    try {
+      await (connectionId
+        ? this.statRemoteTerminalPath(filePath, connectionId)
+        : stat(await resolveAuthorizedPath(filePath, this.host.requireStore())))
+    } catch (error) {
+      if (
+        isENOENT(error) ||
+        (connectionId && RuntimeFileCommands.isRemoteNotFoundErrorMessage(error))
+      ) {
+        throw new Error(`ENOENT: no such file or directory, open '${filePath}'`)
+      }
+      throw error
+    }
   }
 
   async openMobileDiff(

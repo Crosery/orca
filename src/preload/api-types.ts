@@ -21,6 +21,10 @@ import type {
 } from '../shared/local-log-tail-types'
 import type { ReadClipboardTextOptions } from '../shared/clipboard-text'
 import type { AppIdentity } from '../shared/app-identity'
+import type {
+  WriteTerminalRenderDesyncEvidenceArgs,
+  WriteTerminalRenderDesyncEvidenceResult
+} from '../shared/terminal-render-desync-evidence'
 import type { MobileRelayStatus } from '../shared/mobile-relay-status'
 import type { MobilePairingConnectionMode } from '../shared/mobile-pairing-connection-mode'
 import type {
@@ -67,6 +71,8 @@ import type {
   BaseRefDefaultResult,
   BaseRefSearchResult,
   BrowserCookieImportResult,
+  BrowserCertificateFailure,
+  BrowserCertificateProceedResult,
   BrowserLoadError,
   BrowserSessionProfile,
   BrowserSessionProfileScope,
@@ -302,6 +308,7 @@ import type {
   MigrationUnsupportedPtyEntry
 } from '../shared/agent-status-types'
 import type { AgentInterruptInferenceRequest } from '../shared/agent-interrupt-intent'
+import type { AgentQuestionAnsweredInferenceRequest } from '../shared/agent-question-answered-intent'
 import type { TerminalSideEffectBatch } from '../shared/terminal-side-effect-facts'
 import type {
   RuntimeBrowserDriverState,
@@ -321,6 +328,7 @@ import type { ResolvedSourceControlAiGenerationParams } from '../shared/source-c
 import type { SourceControlAiSettings } from '../shared/source-control-ai-types'
 import type { ShellOpenLocalPathResult } from '../shared/shell-open-types'
 import type { SkillDiscoveryResult, SkillDiscoveryTarget } from '../shared/skills'
+import type { SkillFreshnessInventory } from '../shared/skill-freshness'
 import type {
   CrashReportBreadcrumbData,
   CrashReportCopyDiagnosticsArgs,
@@ -424,7 +432,11 @@ import type {
   AiVaultSubagentListArgs,
   AiVaultSubagentListResult
 } from '../shared/ai-vault-types'
-import type { AgentType, NativeChatMessage } from '../shared/native-chat-types'
+import type {
+  AgentType,
+  NativeChatMessage,
+  NativeChatTurnLifecycle
+} from '../shared/native-chat-types'
 import type { TelemetryConsentState } from '../shared/telemetry-consent-types'
 import type { AgentKind, LaunchSource, RequestKind } from '../shared/telemetry-events'
 import type { AppStarSource } from '../shared/gh-star-source'
@@ -478,7 +490,7 @@ export type BrowserApi = {
     worktreeId: string
     sessionProfileId?: string | null
     webContentsId: number
-  }) => Promise<void>
+  }) => Promise<boolean>
   unregisterGuest: (args: { browserPageId: string }) => Promise<void>
   openDevTools: (args: { browserPageId: string }) => Promise<boolean>
   setViewportOverride: (args: {
@@ -489,6 +501,13 @@ export type BrowserApi = {
   onGuestLoadFailed: (
     callback: (args: { browserPageId: string; loadError: BrowserLoadError }) => void
   ) => () => void
+  onCertificateFailureChanged: (
+    callback: (event: { browserPageId: string; failure: BrowserCertificateFailure | null }) => void
+  ) => () => void
+  proceedCertificate: (args: {
+    browserPageId: string
+    challengeId: string
+  }) => Promise<BrowserCertificateProceedResult>
   onPermissionDenied: (callback: (event: BrowserPermissionDeniedEvent) => void) => () => void
   onPopup: (callback: (event: BrowserPopupEvent) => void) => () => void
   onDownloadRequested: (callback: (event: BrowserDownloadRequestedEvent) => void) => () => void
@@ -826,16 +845,34 @@ export type AiVaultApi = {
 // notFound marks a miss caused by the transcript not existing on disk yet
 // (retry-worthy), as opposed to a real read/parse error (#8401).
 export type NativeChatReadSessionResult =
-  | { messages: NativeChatMessage[] }
+  | {
+      messages: NativeChatMessage[]
+      lifecycle?: NativeChatTurnLifecycle
+    }
   | { error: string; notFound?: true }
 
 /** Messages appended to a live-tailed transcript since the previous emit. */
 export type NativeChatAppendedMessages = NativeChatMessage[]
 
 export type NativeChatSubscriptionFrame =
-  | { type: 'snapshot'; messages: NativeChatMessage[]; hasMore: boolean; error?: string }
-  | { type: 'replacement'; messages: NativeChatMessage[]; hasMore: boolean }
-  | { type: 'appended'; messages: NativeChatMessage[] }
+  | {
+      type: 'snapshot'
+      messages: NativeChatMessage[]
+      hasMore: boolean
+      error?: string
+      lifecycle?: NativeChatTurnLifecycle
+    }
+  | {
+      type: 'replacement'
+      messages: NativeChatMessage[]
+      hasMore: boolean
+      lifecycle?: NativeChatTurnLifecycle
+    }
+  | {
+      type: 'appended'
+      messages: NativeChatMessage[]
+      lifecycle?: NativeChatTurnLifecycle
+    }
 
 /** Wire payload for the `nativeChat:appended` push channel. */
 export type NativeChatAppendedPayload = {
@@ -915,6 +952,10 @@ export type AppApi = {
   /** Opens a native directory picker and authorizes the selected directory
    *  for Floating Workspace markdown file creation. */
   pickFloatingWorkspaceDirectory: () => Promise<string | null>
+  /** Persists flag-gated terminal render evidence under app-owned userData. */
+  writeTerminalRenderDesyncEvidence: (
+    args: WriteTerminalRenderDesyncEvidenceArgs
+  ) => Promise<WriteTerminalRenderDesyncEvidenceResult>
 }
 
 export type PreloadApi = {
@@ -1292,7 +1333,7 @@ export type PreloadApi = {
       isAlternateScreen?: boolean
       replay?: string
       sessionExpired?: boolean
-      coldRestore?: { scrollback: string; cwd: string }
+      coldRestore?: { scrollback: string; cwd: string; cols?: number; rows?: number }
       startupCwdFallback?: { kind: 'worktree'; cwd: string }
     }>
     write: (id: string, data: string) => void
@@ -2255,6 +2296,7 @@ export type PreloadApi = {
   }
   skills: {
     discover: (target?: SkillDiscoveryTarget) => Promise<SkillDiscoveryResult>
+    freshnessInventory: () => Promise<SkillFreshnessInventory>
   }
   pet: {
     import: () => Promise<CustomPet | null>
@@ -2434,6 +2476,10 @@ export type PreloadApi = {
     onLocalLogTailChanged: (callback: (payload: LocalLogTailChangedPayload) => void) => () => void
     downloadFile: (args: {
       filePath: string
+      connectionId: string
+    }) => Promise<{ canceled: true } | { canceled: false; destinationPath: string }>
+    downloadFolder: (args: {
+      dirPath: string
       connectionId: string
     }) => Promise<{ canceled: true } | { canceled: false; destinationPath: string }>
     saveDownloadedFile: (args: {
@@ -3170,6 +3216,9 @@ export type PreloadApi = {
     /** Return the current main-process hook cache after renderer hydration. */
     getSnapshot: () => Promise<AgentStatusIpcPayload[]>
     inferInterrupt: (request: AgentInterruptInferenceRequest) => Promise<boolean>
+    /** Guarded clear for an answered AskUserQuestion wait — the CLI emits no
+     *  hook at answer time, so the renderer reports the submit keystroke. */
+    inferQuestionAnswered: (request: AgentQuestionAnsweredInferenceRequest) => Promise<boolean>
     /** Listen for PTYs that still use a legacy numeric pane key but have
      *  registry-backed UUID pane proof. */
     onMigrationUnsupported: (callback: (entry: MigrationUnsupportedPtyEntry) => void) => () => void

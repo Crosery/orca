@@ -1,5 +1,6 @@
 import type { GitHubPRRefreshSkippedReason } from '../../../../shared/types'
 import { translate } from '@/i18n/i18n'
+import { getGitHubUnavailableEmptyStateCopy } from './github-refresh-error-copy'
 import {
   autoRetrySchedule,
   capitalizeReviewLabel,
@@ -62,6 +63,12 @@ export function transientRefreshState(
     workflowAction,
     recovery: ['retry'] as ChecksPanelRecoveryAction[],
     ...schedule
+  }
+  if (input.isGitHubProvider && refresh?.errorType === 'server_error') {
+    const copy = getGitHubUnavailableEmptyStateCopy(refresh.errorType)
+    if (copy) {
+      return { ...base, ...copy }
+    }
   }
   if (isRateLimitRefresh(refresh)) {
     return {

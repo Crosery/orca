@@ -41,7 +41,11 @@ import {
   PER_REPO_FETCH_LIMIT
 } from '../../../../shared/work-items'
 import { deriveCheckStatusFromChecks, syncPRChecksStatus } from './github-checks'
-import { callRuntimeRpc, getActiveRuntimeTarget } from '../../runtime/runtime-rpc-client'
+import {
+  callRuntimeRpc,
+  getActiveRuntimeTarget,
+  RuntimeRpcCallError
+} from '../../runtime/runtime-rpc-client'
 import { getSettingsForRepoRuntimeOwner } from '@/lib/repo-runtime-owner'
 import { settingsForProjectRowOwner } from './github-project-row-owner'
 import { rightSidebarShowsPullRequestData } from '@/lib/right-sidebar-visibility'
@@ -49,6 +53,7 @@ import { hostedReviewInfoFromGitHubPRInfo } from '../../../../shared/hosted-revi
 import { getHostedReviewCacheKey, linkedReviewHintKey } from './hosted-review-cache-identity'
 import { getGitHubPRCacheKey, getGitHubRepoCacheKey } from './github-cache-key'
 import { isGitHubWorkItemsQueryTooLarge } from './github-work-items-query-bounds'
+import { classifyGitHubUnavailable } from '../../../../shared/github-api-availability'
 import { isMacAppDataPath } from '@/lib/passive-macos-app-data-access'
 import { translate } from '@/i18n/i18n'
 import {
@@ -417,6 +422,17 @@ function countGitHubWorkItemsForRepo(
     repoId: context.repoId,
     ...args
   })
+}
+
+function isGitHubUnavailableWorkItemsError(error: unknown): boolean {
+  // Why: remote-runtime transport failures can also say "timed out" or
+  // "unavailable". Only runtime_error came from the GitHub method itself;
+  // other RPC codes must not be attributed to GitHub.
+  if (error instanceof RuntimeRpcCallError && error.code !== 'runtime_error') {
+    return false
+  }
+  const message = error instanceof Error ? error.message : String(error)
+  return classifyGitHubUnavailable(message) !== null
 }
 
 export function projectViewCacheKey(
@@ -2043,6 +2059,11 @@ export type GitHubSlice = {
    * the caller surfaces as a "N of M projects failed to load" banner. A repo
    * served from stale cache on rejection is NOT counted as failed — matching
    * the single-repo behavior of quietly serving stale data.
+   *
+   * `githubUnavailable` is true when every selected GitHub source refresh failed
+   * because GitHub was unreachable/unavailable (5xx outage, network, or rate
+   * limit), even when stale cache data remains available. The caller uses it to
+   * attribute the stale/empty list instead of showing a normal-looking result.
    */
   fetchWorkItemsAcrossRepos: (
     repos: {
@@ -2055,7 +2076,7 @@ export type GitHubSlice = {
     displayLimit: number,
     query: string,
     options?: FetchOptions
-  ) => Promise<{ items: GitHubWorkItem[]; failedCount: number }>
+  ) => Promise<{ items: GitHubWorkItem[]; failedCount: number; githubUnavailable: boolean }>
   /** Fetch one numbered provider page. Pagination pages remain renderer-local. */
   fetchWorkItemsNextPage: (
     repos: {
@@ -2881,10 +2902,13 @@ export const createGitHubSlice: StateCreator<AppState, [], [], GitHubSlice> = (s
 
   fetchWorkItemsAcrossRepos: async (repos, perRepoLimit, displayLimit, query, options) => {
     if (isGitHubWorkItemsQueryTooLarge(query)) {
-      return { items: [], failedCount: 0 }
+      return { items: [], failedCount: 0, githubUnavailable: false }
     }
     const state = get()
     let failedCount = 0
+    let requestFailureCount = 0
+    let unavailableFailureCount = 0
+    let skippedSourceCount = 0
     const perProjectResults = await Promise.all(
       repos.map(async (r) => {
         try {
@@ -2900,7 +2924,12 @@ export const createGitHubSlice: StateCreator<AppState, [], [], GitHubSlice> = (s
           // Why: must use perRepoLimit (not displayLimit) so the cache key
           // matches what fetchWorkItems wrote.
           if (isGitHubWorkItemsSshRemoteRequiredError(err)) {
+            skippedSourceCount += 1
             return [] as GitHubWorkItem[]
+          }
+          requestFailureCount += 1
+          if (isGitHubUnavailableWorkItemsError(err)) {
+            unavailableFailureCount += 1
           }
           const key =
             r.sourceContext?.provider === 'github'
@@ -2923,7 +2952,15 @@ export const createGitHubSlice: StateCreator<AppState, [], [], GitHubSlice> = (s
       })
     )
     const merged = sortWorkItemsByNumber(perProjectResults.flat()).slice(0, displayLimit)
-    return { items: merged, failedCount }
+    // Why: one repo can fail with a 5xx while another succeeds (or fails for a
+    // permission reason). Only claim a global availability failure when every
+    // eligible source failed for a GitHub reachability reason; intentionally
+    // skipped SSH repos are not GitHub sources for this calculation.
+    const githubUnavailable =
+      requestFailureCount > 0 &&
+      requestFailureCount === repos.length - skippedSourceCount &&
+      unavailableFailureCount === requestFailureCount
+    return { items: merged, failedCount, githubUnavailable }
   },
 
   fetchWorkItemsNextPage: async (repos, perRepoLimit, displayLimit, query, page) => {

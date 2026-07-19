@@ -113,6 +113,7 @@ export function isTransientRefreshFailure(refresh: ChecksPanelRefreshInput | und
     return (
       refresh.errorType == null ||
       refresh.errorType === 'network' ||
+      refresh.errorType === 'server_error' ||
       refresh.errorType === 'unknown'
     )
   }

@@ -1,4 +1,5 @@
 import type { PRRefreshErrorType } from '../../shared/types'
+import { classifyGitHubUnavailable } from '../../shared/github-api-availability'
 import { extractExecError } from '../git/exec-error'
 
 /**
@@ -53,6 +54,12 @@ export function classifyPRRefreshError(err: unknown): PRRefreshErrorType {
   // heuristic, and matching 404 first isolates it from any incidental substring.
   if (lower.includes('http 404') || lower.includes('could not resolve to a repository')) {
     return 'repo_unavailable'
+  }
+  // Why: keep GitHub 5xx/network attribution aligned with Tasks while the
+  // stricter checks above preserve PR-refresh-specific precedence.
+  const unavailable = classifyGitHubUnavailable(lower)
+  if (unavailable) {
+    return unavailable
   }
   // Network: structured error codes and full connectivity phrases only. Never a
   // bare "network" substring — a repo/branch/message containing "network" is not
@@ -124,6 +131,8 @@ export function safePRRefreshErrorMessage(errorType: PRRefreshErrorType): string
       return 'GitHub authentication is unavailable. Check your gh login.'
     case 'network':
       return 'GitHub is unreachable right now. Check your network and try again.'
+    case 'server_error':
+      return "GitHub's API is temporarily unavailable (server error). This is a GitHub-side issue."
     case 'permission':
       return 'GitHub did not allow access to this pull request.'
     case 'repo_unavailable':

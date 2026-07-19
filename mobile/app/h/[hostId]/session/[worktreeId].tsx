@@ -141,7 +141,6 @@ import {
   saveCustomKeys,
   type CustomKey
 } from '../../../../src/components/CustomKeyModal'
-import { buildMobileDiffLines } from '../../../../src/session/mobile-diff-lines'
 import {
   addMobileDiffComment,
   formatDiffComments,
@@ -177,7 +176,7 @@ import { useMobileTerminalPaste } from '../../../../src/session/use-mobile-termi
 import { useTerminalLiveInputModePreference } from '../../../../src/session/use-terminal-live-input-mode-preference'
 import { MobileTerminalLiveInputStatus } from '../../../../src/session/MobileTerminalLiveInputStatus'
 import { MobileTerminalInputActions } from '../../../../src/session/MobileTerminalInputActions'
-import { classifyMobileArtifact } from '../../../../src/session/mobile-artifact-kind'
+import { resolveMobileFileTabDoc } from '../../../../src/files/mobile-file-tab-doc'
 import { openMobileTerminalFileTap } from '../../../../src/session/mobile-terminal-file-tap-open'
 import { useLiveWorktreeName } from '../../../../src/session/use-live-worktree-name'
 import {
@@ -1200,7 +1199,7 @@ export default function SessionScreen() {
     nativeChatInputLeaseReady,
     onSendError: showNativeChatSendError
   })
-  const { chatTabIds, toggleTabChatView, showNativeChat, showNativeChatRef } = nativeChatController
+  const { toggleTabChatView, showNativeChat, showNativeChatRef } = nativeChatController
 
   const dictation = useMobileDictation({
     client,
@@ -2043,93 +2042,12 @@ export default function SessionScreen() {
       }
       setFileDocs((prev) => new Map(prev).set(tab.id, { status: 'loading' }))
       try {
-        if (tab.diffSource === 'staged' || tab.diffSource === 'unstaged') {
-          const response = await client.sendRequest('git.diff', {
-            worktree: `id:${worktreeId}`,
-            filePath: tab.relativePath,
-            staged: tab.diffSource === 'staged'
-          })
-          if (!response.ok) {
-            throw new Error((response as RpcFailure).error.message)
-          }
-          const result = (response as RpcSuccess).result as
-            | {
-                kind: 'text'
-                originalContent: string
-                modifiedContent: string
-              }
-            | { kind: 'binary' }
-          if (result.kind !== 'text') {
-            throw new Error('binary_file')
-          }
-          const diff = buildMobileDiffLines(result.originalContent, result.modifiedContent)
-          setFileDocs((prev) =>
-            new Map(prev).set(tab.id, {
-              status: 'ready',
-              kind: 'diff',
-              lines: diff.lines,
-              truncated: diff.truncated
-            })
-          )
-          return
-        }
-        const artifactKind = classifyMobileArtifact(tab.relativePath)
-        if (artifactKind === 'image') {
-          const preview = await client.sendRequest('files.readPreview', {
-            worktree: `id:${worktreeId}`,
-            relativePath: tab.relativePath
-          })
-          if (!preview.ok) {
-            throw new Error((preview as RpcFailure).error.message)
-          }
-          const result = (preview as RpcSuccess).result as {
-            content: string
-            isImage?: boolean
-            mimeType?: string
-          }
-          if (!result.isImage || !result.mimeType || result.content.length === 0) {
-            throw new Error('binary_file')
-          }
-          setFileDocs((prev) =>
-            new Map(prev).set(tab.id, {
-              status: 'ready',
-              kind: 'image',
-              dataUri: `data:${result.mimeType};base64,${result.content}`
-            })
-          )
-          return
-        }
-        const response = await client.sendRequest('files.read', {
-          worktree: `id:${worktreeId}`,
-          relativePath: tab.relativePath
+        const doc = await resolveMobileFileTabDoc(client, {
+          worktreeId,
+          relativePath: tab.relativePath,
+          diffSource: tab.diffSource
         })
-        if (!response.ok) {
-          throw new Error((response as RpcFailure).error.message)
-        }
-        const result = (response as RpcSuccess).result as {
-          content: string
-          truncated: boolean
-          byteLength: number
-        }
-        if (artifactKind === 'html') {
-          setFileDocs((prev) =>
-            new Map(prev).set(tab.id, {
-              status: 'ready',
-              kind: 'html',
-              content: result.content
-            })
-          )
-          return
-        }
-        setFileDocs((prev) =>
-          new Map(prev).set(tab.id, {
-            status: 'ready',
-            kind: 'file',
-            content: result.content,
-            truncated: result.truncated,
-            byteLength: result.byteLength
-          })
-        )
+        setFileDocs((prev) => new Map(prev).set(tab.id, doc))
       } catch (err) {
         const message = err instanceof Error ? err.message : ''
         const previewMessage =
@@ -5416,7 +5334,7 @@ export default function SessionScreen() {
         actions={getMobileTerminalActionSheetActions({
           target: actionTarget,
           tabs: sessionTabs.filter((tab) => tab.type === 'terminal'),
-          chatTabIds,
+          isTabChatView: nativeChatController.isTabChatView,
           nativeChatTranscriptIsLocalReadable,
           onDismiss: () => setActionTarget(null),
           onToggleChat: toggleTabChatView,

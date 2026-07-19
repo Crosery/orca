@@ -163,6 +163,19 @@ describe('getChecksPanelReviewState — composer preserve', () => {
     expect(state.title).toBe('Could not reach GitHub')
   })
 
+  it('attributes a transient 5xx outage to GitHub and preserves a confirmed composer', () => {
+    const state = getChecksPanelReviewState(
+      input({ confirmedReadiness: true, refresh: { status: 'error', errorType: 'server_error' } })
+    )
+    expect(state).toMatchObject({
+      title: 'GitHub is unavailable',
+      description:
+        "GitHub's API is temporarily unavailable. This panel reloads automatically once it recovers.",
+      composerMode: 'confirmed_open',
+      workflowAction: 'create'
+    })
+  })
+
   it('transient error without confirmed readiness never opens a composer', () => {
     const state = getChecksPanelReviewState(
       input({ confirmedReadiness: false, refresh: { status: 'error', errorType: 'network' } })
